@@ -19,7 +19,7 @@ export function Header() {
       <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--color-border)]">
         <div className="flex items-center gap-3">
           <div className="text-lg font-bold tracking-wider text-[var(--color-text-primary)]">
-            AYMAN MACRO DECK
+            SOMO MACRO DECK
           </div>
         </div>
         <div className="flex items-center gap-3">
