@@ -12,19 +12,19 @@ importers:
         specifier: ^4.3.3
         version: 4.3.3(vite@7.3.6(jiti@2.7.0)(lightningcss@1.32.0))
       '@tauri-apps/api':
-        specifier: ^2
-        version: 2.11.1
+        specifier: 2.12.4
+        version: 2.12.4
       '@tauri-apps/plugin-dialog':
-        specifier: ^2.8.4
+        specifier: 2.8.4
         version: 2.8.4
       '@tauri-apps/plugin-opener':
-        specifier: ^2
-        version: 2.5.4
+        specifier: 2.7.2
+        version: 2.7.2
       '@tauri-apps/plugin-process':
-        specifier: ^2.4.0
+        specifier: 2.4.0
         version: 2.4.0
       '@tauri-apps/plugin-updater':
-        specifier: ^2.14.1
+        specifier: 2.14.1
         version: 2.14.1
       react:
         specifier: ^19.1.0
@@ -557,9 +557,6 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
-  '@tauri-apps/api@2.11.1':
-    resolution: {integrity: sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==}
-
   '@tauri-apps/api@2.12.4':
     resolution: {integrity: sha512-pVmfis+4zT8H0Qhp3xPZx9Ju7kpzvA6rr/PSJPyuwfvucTQ8sVt61NYU9KMkK703UFlYadFmjKA4HhybOtN0gg==}
 
@@ -642,8 +639,8 @@ packages:
   '@tauri-apps/plugin-dialog@2.8.4':
     resolution: {integrity: sha512-+6ZOiXenOaxXwb8qCbBPdT2jX2cFPaVVHGIskrpmJLpmWj+qKRTD6X/z9x7hTdSQn7NedcoXCkWGej4a7dC4lw==}
 
-  '@tauri-apps/plugin-opener@2.5.4':
-    resolution: {integrity: sha512-1HnPkb+AmgO29HBazm4uPLKB+r7zzcTBW1d0fyYp1uP+jwtpoiNDGKMMzz58SFp49nOIrxdE3aUJtT57lfO9CQ==}
+  '@tauri-apps/plugin-opener@2.7.2':
+    resolution: {integrity: sha512-LyybP1VSzTMQiaFYcsbAse47KpivlyXdLZMQzGLEnkgQacGESnpjAfFoQ6h5sqWgAdZDH9szYjPzHMpv0Sz+TQ==}
 
   '@tauri-apps/plugin-process@2.4.0':
     resolution: {integrity: sha512-GddrmsSLAYrLa/yTXlXK/YRDzUgYeeOnUXTbiyvJWkmI424RmDPD3FVLeqcon7rv6O6ZfhBilcrHWnSo7o6hIQ==}
@@ -1340,8 +1337,6 @@ snapshots:
       tailwindcss: 4.3.3
       vite: 7.3.6(jiti@2.7.0)(lightningcss@1.32.0)
 
-  '@tauri-apps/api@2.11.1': {}
-
   '@tauri-apps/api@2.12.4': {}
 
   '@tauri-apps/cli-darwin-arm64@2.11.4':
@@ -1395,9 +1390,9 @@ snapshots:
     dependencies:
       '@tauri-apps/api': 2.12.4
 
-  '@tauri-apps/plugin-opener@2.5.4':
+  '@tauri-apps/plugin-opener@2.7.2':
     dependencies:
-      '@tauri-apps/api': 2.11.1
+      '@tauri-apps/api': 2.12.4
 
   '@tauri-apps/plugin-process@2.4.0':
     dependencies:
