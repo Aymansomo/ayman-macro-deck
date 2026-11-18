@@ -3,6 +3,8 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
 import { ACTION_REGISTRY, createAction, getActionDef } from "../lib/actionRegistry";
+import { keyLabel } from "../lib/keyboardLayouts";
+import { ConfirmationDialog } from "./ConfirmationDialog";
 import type {
   MacroButton,
   ButtonAction,
@@ -11,14 +13,28 @@ import type {
   ImageSearchResult,
 } from "../types";
 
+const TRIGGER_PATTERN =
+  /^(?:(?:Ctrl|Alt|Shift|Win)\+)*(?:Numpad\d|NumpadDivide|NumpadMultiply|NumpadSubtract|NumpadAdd|NumpadDecimal|NumpadEnter|Insert|Home|PageUp|Delete|End|PageDown|Arrow(?:Up|Down|Left|Right)|F\d{1,2}|Key[A-Z]|Digit\d|Scan[0-9A-F]{1,4}(?:E0)?)$/i;
+
+function validateTrigger(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return TRIGGER_PATTERN.test(trimmed)
+    ? ""
+    : "Use a key like Numpad1, Ctrl+Shift+Numpad4, KeyA or Scan035E0";
+}
+
 interface Props {
   button: MacroButton;
   onClose: () => void;
+  running?: boolean;
+  lastAction?: { message: string; ok: boolean; at: number } | null;
 }
 
-export function ButtonEditor({ button, onClose }: Props) {
+export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
   const config = useAppStore((s) => s.config);
   const updateButton = useAppStore((s) => s.updateButton);
+  const removeButton = useAppStore((s) => s.removeButton);
   const saveConfig = useAppStore((s) => s.saveConfig);
   const setGamingMode = useAppStore((s) => s.setGamingMode);
   const apiKey = useAppStore(
@@ -40,6 +56,8 @@ export function ButtonEditor({ button, onClose }: Props) {
   const [results, setResults] = useState<ImageSearchResult[]>([]);
   const [downloadingUrl, setDownloadingUrl] = useState<string | null>(null);
   const [showKeyInput, setShowKeyInput] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [triggerError, setTriggerError] = useState("");
 
   useEffect(() => {
     draftRef.current = draft;
@@ -54,6 +72,8 @@ export function ButtonEditor({ button, onClose }: Props) {
     setResults([]);
     setSearchError("");
     setShowKeyInput(false);
+    setConfirmRemove(false);
+    setTriggerError(validateTrigger(button.trigger ?? ""));
   }, [button.id]);
 
   const activeProfile = config.profiles.find(
@@ -104,6 +124,11 @@ export function ButtonEditor({ button, onClose }: Props) {
   };
 
   const commit = async (target: MacroButton) => {
+    const error = validateTrigger(target.trigger ?? "");
+    if (error) {
+      setTriggerError(error);
+      return;
+    }
     updateButton(activeProfile.id, target);
     await saveConfig();
     const latestConfig = useAppStore.getState().config;
@@ -133,6 +158,13 @@ export function ButtonEditor({ button, onClose }: Props) {
   const handleCancel = () => {
     setDraft(button);
     setSaved(false);
+  };
+
+  const handleRemove = () => {
+    removeButton(activeProfile.id, button.id);
+    void saveConfig();
+    setConfirmRemove(false);
+    onClose();
   };
 
   const pickImage = async () => {
@@ -200,9 +232,28 @@ export function ButtonEditor({ button, onClose }: Props) {
     <div className="w-[360px] h-full bg-[var(--color-bg-secondary)] border-l border-[var(--color-border)] flex flex-col overflow-hidden animate-slideRight">
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
-        <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
-          Edit Button 
-        </h2>
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
+            Edit Button
+          </h2>
+          {running && (
+            <div className="text-[9px] text-[var(--color-accent)] mt-0.5 animate-pulse">
+              Action running…
+            </div>
+          )}
+          {!running && lastAction && (
+            <div
+              className={`text-[9px] mt-0.5 truncate max-w-[150px] ${
+                lastAction.ok
+                  ? "text-[var(--color-success)]"
+                  : "text-[var(--color-danger)]"
+              }`}
+              title={lastAction.message}
+            >
+              {lastAction.ok ? "✓" : "✕"} {lastAction.message}
+            </div>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => patch({ enabled: !draft.enabled })}
@@ -226,18 +277,50 @@ export function ButtonEditor({ button, onClose }: Props) {
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
         {/* Key */}
-        <Field label="KEY">
+        <Field label="PHYSICAL KEY">
           <div className="flex items-center gap-2">
-            <span className="w-10 h-10 flex items-center justify-center rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-lg font-mono font-bold text-[var(--color-accent)]">
-              {draft.key}
+            <span className="min-w-10 h-10 px-2 flex items-center justify-center rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-lg font-mono font-bold text-[var(--color-accent)]">
+              {draft.physicalKeyId ? keyLabel(draft.physicalKeyId) : draft.key}
             </span>
-            <span className="text-xs text-[var(--color-text-muted)]">
-              {draft.key === 10
-                ? "Numpad /"
-                : draft.key === 11
-                  ? "Numpad *"
-                  : `Numpad ${draft.key}`}
-            </span>
+            <div className="min-w-0">
+              <div className="text-xs text-[var(--color-text-secondary)]">
+                {draft.physicalKeyId
+                  ? `Physical ID: ${draft.physicalKeyId}`
+                  : "Legacy slot (no physical ID yet)"}
+              </div>
+              <div className="text-[10px] text-[var(--color-text-muted)]">
+                Legacy slot {draft.key || "—"} · NumLock-independent
+              </div>
+            </div>
+          </div>
+        </Field>
+
+        {/* Trigger */}
+        <Field label="TRIGGER (optional)">
+          <div className="space-y-1.5">
+            <input
+              value={draft.trigger ?? ""}
+              onChange={(event) => {
+                const value = event.target.value;
+                setTriggerError(validateTrigger(value));
+                patch({ trigger: value.trim() ? value.trim() : undefined });
+              }}
+              placeholder="Numpad1  ·  Ctrl+Shift+Numpad4  ·  Scan035E0"
+              className={`w-full px-3 py-2 rounded-lg bg-[var(--color-bg-card)] border text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] ${
+                triggerError
+                  ? "border-[var(--color-danger)]"
+                  : "border-[var(--color-border)]"
+              }`}
+            />
+            <div className="text-[10px] text-[var(--color-text-muted)]">
+              Custom shortcut or calibrated scan-code key. Leave empty to use the
+              physical key shown above.
+            </div>
+            {triggerError && (
+              <div className="text-[10px] text-[var(--color-danger)]">
+                {triggerError}
+              </div>
+            )}
           </div>
         </Field>
 
@@ -580,7 +663,24 @@ export function ButtonEditor({ button, onClose }: Props) {
             Cancel
           </button>
         )}
+        <button
+          onClick={() => setConfirmRemove(true)}
+          title="Remove this key assignment from the active profile"
+          className="px-3 py-2 rounded-lg text-sm text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 border border-[var(--color-border)] transition-colors cursor-pointer"
+        >
+          Remove
+        </button>
       </div>
+
+      <ConfirmationDialog
+        open={confirmRemove}
+        title="Remove key assignment"
+        message={`Remove "${draft.name}" from ${activeProfile.name}? The physical key becomes unassigned; no other profile is changed.`}
+        confirmLabel="Remove"
+        danger
+        onConfirm={handleRemove}
+        onCancel={() => setConfirmRemove(false)}
+      />
     </div>
   );
 }

@@ -1,21 +1,47 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { AppConfig, Profile, MacroButton } from "../types";
+import type {
+  AppConfig,
+  Profile,
+  MacroButton,
+  KeyboardLayout,
+} from "../types";
+import {
+  allKeysForLayout,
+  keyLabel,
+  legacySlotForPhysicalKey,
+  normalizeLayout,
+} from "../lib/keyboardLayouts";
 
 function generateId(): string {
   return crypto.randomUUID().slice(0, 8);
 }
 
-function createDefaultButton(key: number): MacroButton {
+function physicalIdForLegacyKey(key: number): string | undefined {
+  if (key >= 1 && key <= 9) return `Numpad${key}`;
+  if (key === 10) return "NumpadDivide";
+  if (key === 11) return "NumpadMultiply";
+  return undefined;
+}
+
+function createDefaultButton(key: number, physicalKeyId?: string): MacroButton {
   return {
     id: generateId(),
     key,
-    name: `Key ${key}`,
+    physicalKeyId: physicalKeyId ?? physicalIdForLegacyKey(key),
+    name: physicalKeyId ? keyLabel(physicalKeyId) : `Key ${key}`,
     icon: "",
     description: "",
     enabled: true,
     actions: [],
   };
+}
+
+function withLegacyPhysicalIds(buttons: MacroButton[]): MacroButton[] {
+  return buttons.map((button) => ({
+    ...button,
+    physicalKeyId: button.physicalKeyId ?? physicalIdForLegacyKey(button.key),
+  }));
 }
 
 function createProfileSwitchButton(
@@ -26,6 +52,7 @@ function createProfileSwitchButton(
   return {
     id: generateId(),
     key,
+    physicalKeyId: physicalIdForLegacyKey(key),
     name: target === "Gaming" ? "Switch to Gaming" : "Switch to Normal",
     icon: target === "Gaming" ? "🎮" : "🖥",
     description: `Numpad ${label} — switch to ${target} profile`,
@@ -41,7 +68,7 @@ function createProfileSwitchButton(
   };
 }
 
-function createDefaultProfile(name: string): Profile {
+function createDefaultProfile(name: string, layout: KeyboardLayout = "numpad"): Profile {
   const buttons: MacroButton[] = [];
   for (let i = 1; i <= 9; i++) {
     buttons.push(createDefaultButton(i));
@@ -51,6 +78,7 @@ function createDefaultProfile(name: string): Profile {
   return {
     id: generateId(),
     name,
+    layout,
     buttons,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -234,7 +262,8 @@ function createGamingProfile(): Profile {
   return {
     id: generateId(),
     name: "Gaming",
-    buttons,
+    layout: "numpad",
+    buttons: withLegacyPhysicalIds(buttons),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -400,7 +429,8 @@ function createNormalProfile(): Profile {
   return {
     id: generateId(),
     name: "Normal",
-    buttons,
+    layout: "numpad",
+    buttons: withLegacyPhysicalIds(buttons),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -451,31 +481,12 @@ function createDefaultConfig(): AppConfig {
         buttonSize: 100,
         gridSize: 3,
       },
-      rdr2: {
-        savesPath:
-          "C:\\Users\\Ayman\\Documents\\Rockstar Games\\Red Dead Redemption 2\\Profiles",
-        backupPath: "E:\\ayman\\ME\\Macro\\RDR2Backup\\Saves",
-        installerPath:
-          "C:\\Users\\Ayman\\Downloads\\Application\\Rockstar-Games-Launcher.exe",
-        uninstallCommand: "",
-        confirmBeforeUninstall: true,
-      },
       images: {
         steamgriddbApiKey: "",
       },
     },
   };
 }
-
-export const RDR2_DEFAULTS = {
-  savesPath:
-    "C:\\Users\\Ayman\\Documents\\Rockstar Games\\Red Dead Redemption 2\\Profiles",
-  backupPath: "E:\\ayman\\ME\\Macro\\RDR2Backup\\Saves",
-  installerPath:
-    "C:\\Users\\Ayman\\Downloads\\Application\\Rockstar-Games-Launcher.exe",
-  uninstallCommand: "",
-  confirmBeforeUninstall: true,
-} as const;
 
 export const IMAGE_DEFAULTS = {
   steamgriddbApiKey: "",
@@ -489,13 +500,22 @@ interface AppStore {
 
   setActiveProfile: (profileId: string) => void;
   updateButton: (profileId: string, button: MacroButton) => void;
+  removeButton: (profileId: string, buttonId: string) => void;
+  ensureButtonForPhysicalKey: (
+    profileId: string,
+    physicalKeyId: string,
+  ) => string | null;
+  setButtonPhysicalKey: (buttonId: string, physicalKeyId: string) => boolean;
+  setProfileLayout: (profileId: string, layout: KeyboardLayout) => void;
   createProfile: (name: string) => void;
   deleteProfile: (profileId: string) => void;
   renameProfile: (profileId: string, name: string) => void;
   duplicateProfile: (profileId: string, newName: string) => void;
-  updateRdr2Settings: (patch: Partial<AppConfig["settings"]["rdr2"]>) => void;
   setImageSearchApiKey: (key: string) => void;
   setSteamProfilesFolder: (folder: string) => void;
+  updateKeyboardSettings: (
+    patch: Partial<AppConfig["settings"]["keyboard"]>,
+  ) => void;
   addSteamAccount: (account: string, shortcutPath: string) => void;
   renameSteamAccount: (oldName: string, newName: string) => void;
   removeSteamAccount: (account: string) => void;
@@ -549,15 +569,30 @@ function repairMojibake(input: string): string {
   return s;
 }
 
+const PHYSICAL_KEY_IDS = new Set(allKeysForLayout("full").map((key) => key.id));
+
+function inferPhysicalKeyId(button: MacroButton): string | undefined {
+  const explicit = button.physicalKeyId?.trim();
+  if (explicit && PHYSICAL_KEY_IDS.has(explicit)) return explicit;
+  const trigger = button.trigger?.trim();
+  if (trigger && PHYSICAL_KEY_IDS.has(trigger)) return trigger;
+  return physicalIdForLegacyKey(button.key);
+}
+
 export function normalizeProfile(profile: Profile): Profile {
   const cleaned: Profile & { oldKeyboardButtons?: never } = {
     ...profile,
+    layout: normalizeLayout(profile.layout),
     buttons: Array.isArray(profile.buttons)
-      ? profile.buttons.map((b) => ({
-          ...b,
-          icon: repairMojibake(b.icon),
-          description: repairMojibake(b.description),
-        }))
+      ? profile.buttons.map((button) => {
+          const physicalKeyId = inferPhysicalKeyId(button);
+          return {
+            ...button,
+            physicalKeyId,
+            icon: repairMojibake(button.icon),
+            description: repairMojibake(button.description),
+          };
+        })
       : Array.from({ length: 11 }, (_, i) => createDefaultButton(i + 1)),
   };
   delete cleaned.oldKeyboardButtons;
@@ -588,6 +623,108 @@ export const useAppStore = create<AppStore>((set, get) => ({
                 ),
                 updatedAt: Date.now(),
               }
+            : p,
+        ),
+      },
+    })),
+
+  removeButton: (profileId, buttonId) =>
+    set((state) => ({
+      config: {
+        ...state.config,
+        profiles: state.config.profiles.map((p) =>
+          p.id === profileId
+            ? {
+                ...p,
+                buttons: p.buttons.filter((b) => b.id !== buttonId),
+                updatedAt: Date.now(),
+              }
+            : p,
+        ),
+      },
+    })),
+
+  ensureButtonForPhysicalKey: (profileId, physicalKeyId) => {
+    const profile = get().config.profiles.find((p) => p.id === profileId);
+    if (!profile || !PHYSICAL_KEY_IDS.has(physicalKeyId)) return null;
+
+    const existing = profile.buttons.find(
+      (button) => button.physicalKeyId === physicalKeyId,
+    );
+    if (existing) return existing.id;
+
+    const slot = legacySlotForPhysicalKey(physicalKeyId);
+    const newId = generateId();
+    const button: MacroButton = {
+      id: newId,
+      key: slot ?? 0,
+      physicalKeyId,
+      name: keyLabel(physicalKeyId),
+      icon: "",
+      description: "",
+      enabled: true,
+      actions: [],
+    };
+    set((state) => ({
+      config: {
+        ...state.config,
+        profiles: state.config.profiles.map((p) =>
+          p.id === profileId
+            ? {
+                ...p,
+                buttons: [...p.buttons, button],
+                updatedAt: Date.now(),
+              }
+            : p,
+        ),
+      },
+    }));
+    return newId;
+  },
+
+  setButtonPhysicalKey: (buttonId, physicalKeyId) => {
+    const id = physicalKeyId.trim();
+    if (!id) return false;
+    const state = get();
+    const profile = state.config.profiles.find((p) =>
+      p.buttons.some((button) => button.id === buttonId),
+    );
+    if (!profile) return false;
+    if (
+      profile.buttons.some(
+        (button) => button.id !== buttonId && button.physicalKeyId === id,
+      )
+    ) {
+      return false;
+    }
+    set((current) => ({
+      config: {
+        ...current.config,
+        profiles: current.config.profiles.map((p) =>
+          p.id === profile.id
+            ? {
+                ...p,
+                buttons: p.buttons.map((button) =>
+                  button.id === buttonId
+                    ? { ...button, physicalKeyId: id, trigger: undefined }
+                    : button,
+                ),
+                updatedAt: Date.now(),
+              }
+            : p,
+        ),
+      },
+    }));
+    return true;
+  },
+
+  setProfileLayout: (profileId, layout) =>
+    set((state) => ({
+      config: {
+        ...state.config,
+        profiles: state.config.profiles.map((p) =>
+          p.id === profileId
+            ? { ...p, layout: normalizeLayout(layout), updatedAt: Date.now() }
             : p,
         ),
       },
@@ -652,17 +789,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
       };
     }),
 
-  updateRdr2Settings: (patch) =>
-    set((state) => ({
-      config: {
-        ...state.config,
-        settings: {
-          ...state.config.settings,
-          rdr2: { ...RDR2_DEFAULTS, ...state.config.settings.rdr2, ...patch },
-        },
-      },
-    })),
-
   setImageSearchApiKey: (key) =>
     set((state) => ({
       config: {
@@ -685,6 +811,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
         settings: {
           ...state.config.settings,
           steam: { ...state.config.settings.steam, profileShortcutsFolder: folder },
+        },
+      },
+    })),
+
+  updateKeyboardSettings: (patch) =>
+    set((state) => ({
+      config: {
+        ...state.config,
+        settings: {
+          ...state.config.settings,
+          keyboard: { ...state.config.settings.keyboard, ...patch },
         },
       },
     })),
@@ -764,7 +901,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
               config.settings.steam?.profileShortcutsFolder ??
               "E:\\ayman\\ME\\Macro\\script\\SteamProfiles",
           },
-          rdr2: { ...RDR2_DEFAULTS, ...config.settings?.rdr2 },
           images: { ...IMAGE_DEFAULTS, ...config.settings?.images },
         },
       },

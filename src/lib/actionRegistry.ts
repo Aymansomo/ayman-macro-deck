@@ -169,13 +169,6 @@ export const ACTION_REGISTRY: ActionDefinition[] = [
       return profiles.map((p) => p.name);
     },
   },
-  {
-    type: "rdr2_cycle",
-    name: "RDR2 Cycle",
-    description: "Backup saves → uninstall Rockstar Launcher → silent fresh install",
-    icon: "🐎",
-    paramSchema: [],
-  },
 ];
 
 export function getActionDef(type: string): ActionDefinition | undefined {

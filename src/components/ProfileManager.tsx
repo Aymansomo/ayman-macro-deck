@@ -1,5 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import { useAppStore } from "../store";
+import {
+  exportConfig,
+  importConfig,
+  listConfigBackups,
+  loadConfigRaw,
+  openLogsFolder,
+  restoreConfigBackup,
+} from "../lib/backend";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 
 interface Props {
@@ -15,6 +23,7 @@ export function ProfileManager({ open, onClose }: Props) {
   const renameProfile = useAppStore((s) => s.renameProfile);
   const duplicateProfile = useAppStore((s) => s.duplicateProfile);
   const saveConfig = useAppStore((s) => s.saveConfig);
+  const loadConfig = useAppStore((s) => s.loadConfig);
 
   const [newName, setNewName] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -22,8 +31,11 @@ export function ProfileManager({ open, onClose }: Props) {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [duplicateTarget, setDuplicateTarget] = useState<string | null>(null);
   const [duplicateName, setDuplicateName] = useState("");
+  const [backups, setBackups] = useState<string[]>([]);
+  const [toolsMessage, setToolsMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const importRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (renamingId && renameInputRef.current) {
@@ -31,6 +43,56 @@ export function ProfileManager({ open, onClose }: Props) {
       renameInputRef.current.select();
     }
   }, [renamingId]);
+
+  useEffect(() => {
+    if (!open) return;
+    void listConfigBackups().then(setBackups).catch(() => setBackups([]));
+  }, [open]);
+
+  const syncConfig = async () => {
+    const json = await loadConfigRaw();
+    const parsed = JSON.parse(json);
+    if (parsed?.version === 1) loadConfig(parsed);
+  };
+
+  const handleExport = async () => {
+    try {
+      const json = await exportConfig();
+      const url = URL.createObjectURL(
+        new Blob([json], { type: "application/json" }),
+      );
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `ayman-macro-deck-config-${Date.now()}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setToolsMessage("Config exported");
+    } catch (error) {
+      setToolsMessage(String(error));
+    }
+  };
+
+  const handleImportFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      await importConfig(await file.text());
+      await syncConfig();
+      setToolsMessage(`Imported ${file.name}`);
+    } catch (error) {
+      setToolsMessage(String(error));
+    }
+  };
+
+  const handleRestore = async (name: string) => {
+    try {
+      await restoreConfigBackup(name);
+      await syncConfig();
+      setToolsMessage(`Restored ${name}`);
+      setBackups(await listConfigBackups());
+    } catch (error) {
+      setToolsMessage(String(error));
+    }
+  };
 
   if (!open) return null;
 
@@ -218,6 +280,68 @@ export function ProfileManager({ open, onClose }: Props) {
               );
             })}
           </div>
+        </div>
+
+        <div className="border-t border-[var(--color-border)] px-5 py-4 space-y-3">
+          <div className="text-[10px] font-medium tracking-wider text-[var(--color-text-muted)]">
+            TOOLS
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => void handleExport()}
+              className="px-3 py-1.5 rounded-lg text-[11px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] cursor-pointer"
+            >
+              Export config
+            </button>
+            <button
+              onClick={() => importRef.current?.click()}
+              className="px-3 py-1.5 rounded-lg text-[11px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] cursor-pointer"
+            >
+              Import config
+            </button>
+            <input
+              ref={importRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => {
+                void handleImportFile(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
+            <button
+              onClick={() => void openLogsFolder().catch((e) => setToolsMessage(String(e)))}
+              className="px-3 py-1.5 rounded-lg text-[11px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] cursor-pointer"
+            >
+              Open logs folder
+            </button>
+          </div>
+          {backups.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] text-[var(--color-text-muted)]">
+                Config backups — select to restore
+              </div>
+              <select
+                defaultValue=""
+                onChange={(event) => {
+                  if (event.target.value) void handleRestore(event.target.value);
+                }}
+                className="w-full px-2 py-1.5 rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-[11px] text-[var(--color-text-secondary)] outline-none cursor-pointer"
+              >
+                <option value="">Choose a backup…</option>
+                {backups.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {toolsMessage && (
+            <div className="text-[10px] text-[var(--color-text-muted)]">
+              {toolsMessage}
+            </div>
+          )}
         </div>
       </div>
 

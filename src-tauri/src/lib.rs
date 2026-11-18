@@ -1,16 +1,42 @@
+//! AYMAN MACRO DECK — native Rust backend.
+//!
+//! Phase 1 foundation:
+//! - `keyboard`   KeyboardManager  global low-level hook, numpad + modifiers
+//! - `actions`    ActionEngine     validated, native action execution
+//! - `profiles`   ProfileManager   profile CRUD + switching without restart
+//! - `state`      StateManager     config, gaming mode, engine status
+//! - `tray`       TrayManager      tray, pause/resume, clean exit
+//! - `logging`    file log in `%APPDATA%\com.ayman.macrodeck\logs\app.log`
+
+mod actions;
+mod device;
+mod keyid;
+mod keyboard;
+mod logging;
+mod models;
+mod profiles;
+mod server;
+mod shortcut;
+mod state;
+mod tray;
+
 use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
+use std::sync::mpsc::channel;
+use std::sync::Arc;
+
+use serde::Serialize;
 use tauri::Manager;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYBDINPUT, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
-};
+
+use device::{DeviceKeyEvent, DeviceStatus, KeyboardDevice, RawInputManager};
+use keyboard::{KeyboardManager, KeyboardStatus};
+use state::AppCore;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-fn config_path(app: &tauri::AppHandle) -> PathBuf {
+pub(crate) fn config_path(app: &tauri::AppHandle) -> PathBuf {
     let dir = app
         .path()
         .app_config_dir()
@@ -19,383 +45,429 @@ fn config_path(app: &tauri::AppHandle) -> PathBuf {
     dir.join("config.json")
 }
 
+// --------------------------------------------------------------------------
+// config
+// --------------------------------------------------------------------------
+
 #[tauri::command]
-fn load_config(app: tauri::AppHandle) -> Result<String, String> {
-    let path = config_path(&app);
-    if path.exists() {
-        fs::read_to_string(&path).map_err(|e| e.to_string())
+fn load_config(core: tauri::State<'_, Arc<AppCore>>) -> Result<String, String> {
+    Ok(core.config_json())
+}
+
+#[tauri::command]
+fn save_config(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    config: String,
+) -> Result<(), String> {
+    core.replace_config_json(&config)?;
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(())
+}
+
+/// Kept for the current editor, which asks for a reload after saving a button.
+/// The native engine re-registers shortcuts instead of restarting a script.
+#[tauri::command]
+fn reload_ahk_script(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    _ahk_executable: Option<String>,
+    _script_path: Option<String>,
+) -> Result<(), String> {
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(())
+}
+
+// --------------------------------------------------------------------------
+// actions
+// --------------------------------------------------------------------------
+
+#[tauri::command]
+fn execute_action(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    action_type: String,
+    params: serde_json::Value,
+) -> Result<String, String> {
+    actions::validate(&action_type, &params)
+        .map_err(|e| format!("Invalid action: {}", e))?;
+
+    let outcome = actions::execute(&action_type, &params)?;
+    match &outcome {
+        actions::Outcome::ToggleGaming => core.set_gaming(!core.gaming()),
+        actions::Outcome::SwitchProfile(name) => {
+            core.apply_profile_switch(name);
+            core.persist()?;
+        }
+        actions::Outcome::Done(_) => {}
+    }
+
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    logging::info(format!("execute_action {}: {}", action_type, outcome.message()));
+    Ok(outcome.message())
+}
+
+/// Runs a button exactly like a physical key press (used to test a macro).
+#[tauri::command]
+fn trigger_button(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    button_id: String,
+) -> Result<serde_json::Value, String> {
+    let results = keyboard.dispatch_button(&button_id);
+    core.emit_state(&keyboard.status());
+    Ok(serde_json::json!({
+        "buttonId": button_id,
+        "results": results,
+        "state": core.state_json(&keyboard.status()),
+    }))
+}
+
+// --------------------------------------------------------------------------
+// state / keyboard
+// --------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_app_state(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+) -> serde_json::Value {
+    core.state_json(&keyboard.status())
+}
+
+#[tauri::command]
+fn get_gaming_mode(core: tauri::State<'_, Arc<AppCore>>) -> Result<bool, String> {
+    Ok(core.gaming())
+}
+
+#[tauri::command]
+fn set_gaming_mode(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    gaming: bool,
+) -> Result<serde_json::Value, String> {
+    core.set_gaming(gaming);
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(core.state_json(&keyboard.status()))
+}
+
+#[tauri::command]
+fn get_keyboard_connected(
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+) -> Result<bool, String> {
+    Ok(keyboard.is_running())
+}
+
+#[tauri::command]
+fn set_shortcuts_paused(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    paused: bool,
+) -> Result<serde_json::Value, String> {
+    keyboard.set_paused(paused);
+    core.emit_state(&keyboard.status());
+    Ok(core.state_json(&keyboard.status()))
+}
+
+#[tauri::command]
+fn reload_shortcuts(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+) -> Result<serde_json::Value, String> {
+    let count = keyboard.reload()?;
+    logging::info(format!("reloaded {} shortcut(s)", count));
+    core.emit_state(&keyboard.status());
+    Ok(core.state_json(&keyboard.status()))
+}
+
+// --------------------------------------------------------------------------
+// devices / engine status (Stage 1: real Raw Input identity + isolation)
+// --------------------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MacroEngineStatus {
+    device: DeviceStatus,
+    keyboard: KeyboardStatus,
+}
+
+#[tauri::command]
+fn get_keyboard_devices(
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Vec<KeyboardDevice> {
+    devices.devices()
+}
+
+#[tauri::command]
+fn refresh_keyboard_devices(
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Vec<KeyboardDevice> {
+    devices.refresh()
+}
+
+#[tauri::command]
+fn get_selected_macro_device(
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Option<KeyboardDevice> {
+    devices.selected()
+}
+
+#[tauri::command]
+fn select_macro_device(
+    device_id: String,
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Result<KeyboardDevice, String> {
+    let selected = devices.select(&device_id)?;
+    core.emit_state(&keyboard.status());
+    Ok(selected)
+}
+
+#[tauri::command]
+fn clear_macro_device_selection(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Result<(), String> {
+    devices.clear_selection();
+    core.emit_state(&keyboard.status());
+    Ok(())
+}
+
+#[tauri::command]
+fn start_device_test(
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> DeviceStatus {
+    devices.start_test();
+    devices.status()
+}
+
+#[tauri::command]
+fn stop_device_test(
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> DeviceStatus {
+    devices.stop_test();
+    devices.status()
+}
+
+#[tauri::command]
+fn get_device_test_candidate(
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Option<KeyboardDevice> {
+    devices.test_candidate()
+}
+
+#[tauri::command]
+fn confirm_device_test(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Result<Option<KeyboardDevice>, String> {
+    let Some(candidate) = devices.test_candidate() else {
+        return Err("Press a key on the intended keyboard first".to_string());
+    };
+    let selected = devices.select(&candidate.id)?;
+    core.emit_state(&keyboard.status());
+    Ok(Some(selected))
+}
+
+#[tauri::command]
+fn get_macro_engine_status(
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> MacroEngineStatus {
+    MacroEngineStatus {
+        device: devices.status(),
+        keyboard: keyboard.status(),
+    }
+}
+
+#[tauri::command]
+fn set_macro_engine_running(
+    running: bool,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Result<MacroEngineStatus, String> {
+    if running {
+        // The observer/worker threads have a controlled lifecycle and are not
+        // recreated here; start/stop toggles Raw Input capture plus the pause
+        // gate so no stale events can execute.
+        devices.start()?;
+        keyboard.set_paused(false);
     } else {
-        Ok(String::from("{}"))
+        keyboard.set_paused(true);
+        devices.stop();
     }
+    Ok(MacroEngineStatus {
+        device: devices.status(),
+        keyboard: keyboard.status(),
+    })
 }
 
 #[tauri::command]
-fn save_config(app: tauri::AppHandle, config: String) -> Result<(), String> {
-    let path = config_path(&app);
-    fs::write(&path, config).map_err(|e| e.to_string())
+fn set_macro_device_collections(
+    include: bool,
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> DeviceStatus {
+    devices.set_include_collections(include)
+}
+
+// --------------------------------------------------------------------------
+// tools: logs, config import/export, backups
+// --------------------------------------------------------------------------
+
+#[tauri::command]
+fn open_logs_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("logs");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    open::that(dir).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn reload_ahk_script(ahk_executable: String, script_path: String) -> Result<(), String> {
-    let executable = if ahk_executable.trim().is_empty() {
-        "AutoHotkey.exe"
-    } else {
-        ahk_executable.as_str()
-    };
-
-    StdCommand::new(executable)
-        .arg(script_path)
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+fn export_config(core: tauri::State<'_, Arc<AppCore>>) -> Result<String, String> {
+    Ok(core.config_json())
 }
 
 #[tauri::command]
-fn execute_action(action_type: String, params: serde_json::Value) -> Result<String, String> {
-    match action_type.as_str() {
-        "open_application" => {
-            let path = params["path"]
-                .as_str()
-                .ok_or("missing 'path' parameter")?;
-            open::that(path).map_err(|e| e.to_string())?;
-            Ok(format!("Opened: {}", path))
-        }
-
-        "open_url" => {
-            let url = params["url"]
-                .as_str()
-                .ok_or("missing 'url' parameter")?;
-            open::that(url).map_err(|e| e.to_string())?;
-            Ok(format!("Opened URL: {}", url))
-        }
-
-        "switch_steam_account" => {
-            let account = params["account"]
-                .as_str()
-                .ok_or("missing 'account' parameter")?;
-            if let Some(shortcuts) = params["shortcuts"].as_object() {
-                if let Some(path_val) = shortcuts.get(account) {
-                    let path = path_val.as_str().ok_or("invalid shortcut path")?;
-                    open::that(path).map_err(|e| e.to_string())?;
-                    return Ok(format!("Switched Steam account: {}", account));
-                }
-            }
-            Err(format!(
-                "Steam account shortcut not found for: {}",
-                account
-            ))
-        }
-
-        "launch_steam_game" => {
-            let app_id = params["appId"]
-                .as_str()
-                .ok_or("missing 'appId' parameter")?;
-            let uri = format!("steam://rungameid/{}", app_id);
-            open::that(&uri).map_err(|e| e.to_string())?;
-            Ok(format!("Launched Steam game: {}", app_id))
-        }
-
-        "launch_epic_game" => {
-            let uri = params["uri"]
-                .as_str()
-                .ok_or("missing 'uri' parameter")?;
-            open::that(uri).map_err(|e| e.to_string())?;
-            Ok("Launched Epic game".to_string())
-        }
-
-        "change_audio_device" => {
-            let device = params["device"]
-                .as_str()
-                .ok_or("missing 'device' parameter")?;
-            let svv_path = params["soundVolumeViewPath"]
-                .as_str()
-                .ok_or("missing 'soundVolumeViewPath' parameter")?;
-            for device_type in 0..=2 {
-                let _ = StdCommand::new(svv_path)
-                    .args(["/SetDefault", device, &device_type.to_string()])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .spawn();
-            }
-            Ok(format!("Audio switched to: {}", device))
-        }
-
-        "toggle_gaming_mode" => {
-            use windows::Win32::UI::Input::KeyboardAndMouse::VK_SCROLL;
-            unsafe {
-                let state = GetKeyState(VK_SCROLL.0 as i32);
-                let is_on = (state & 1) != 0;
-                let action = if is_on {
-                    KEYEVENTF_KEYUP
-                } else {
-                    KEYEVENTF_EXTENDEDKEY
-                };
-                let input = INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VK_SCROLL,
-                            dwFlags: action,
-                            ..Default::default()
-                        },
-                    },
-                };
-                let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
-                let new_state = !is_on;
-                Ok(serde_json::json!({
-                    "message": if new_state { "Gaming Mode ON" } else { "Gaming Mode OFF" },
-                    "gamingMode": new_state
-                })
-                .to_string())
-            }
-        }
-
-        "open_folder" => {
-            let path = params["path"]
-                .as_str()
-                .ok_or("missing 'path' parameter")?;
-            open::that(path).map_err(|e| e.to_string())?;
-            Ok(format!("Opened folder: {}", path))
-        }
-
-        "run_command" => {
-            let command = params["command"]
-                .as_str()
-                .ok_or("missing 'command' parameter")?;
-            let args: Vec<String> = match &params["args"] {
-                serde_json::Value::Array(a) => a
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect(),
-                serde_json::Value::String(s) => s
-                    .split(',')
-                    .map(|a| a.trim().to_string())
-                    .filter(|a| !a.is_empty())
-                    .collect(),
-                _ => vec![],
-            };
-            StdCommand::new(command)
-                .args(&args)
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            Ok(format!("Ran command: {}", command))
-        }
-
-        "run_ahk_script" => {
-            let script_path = params["scriptPath"]
-                .as_str()
-                .ok_or("missing 'scriptPath' parameter")?;
-            let ahk_exe = params["ahkExecutable"]
-                .as_str()
-                .unwrap_or("AutoHotkey.exe");
-            StdCommand::new(ahk_exe)
-                .arg(script_path)
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            Ok(format!("Ran AHK script: {}", script_path))
-        }
-
-        "keyboard_shortcut" => {
-            let keys_str = params["keys"]
-                .as_str()
-                .ok_or("missing 'keys' parameter")?;
-            let key_names: Vec<String> = keys_str
-                .split('+')
-                .map(|k| k.trim().to_lowercase())
-                .filter(|k| !k.is_empty())
-                .collect();
-            if key_names.is_empty() {
-                return Err("no keys specified".to_string());
-            }
-
-            let virtual_keys: Vec<u16> = key_names
-                .iter()
-                .map(|k| key_name_to_vk(k))
-                .collect::<Option<Vec<_>>>()
-                .ok_or("unknown key name in shortcut")?;
-
-            let mut inputs: Vec<INPUT> = Vec::new();
-            for &vk in &virtual_keys {
-                inputs.push(make_key_input(vk, false));
-            }
-            for &vk in virtual_keys.iter().rev() {
-                inputs.push(make_key_input(vk, true));
-            }
-
-            unsafe {
-                let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-            }
-            Ok(format!("Sent shortcut: {}", keys_str))
-        }
-
-        "volume_up" => {
-            send_media_key(VK_VOLUME_UP);
-            Ok("Volume up".to_string())
-        }
-
-        "volume_down" => {
-            send_media_key(VK_VOLUME_DOWN);
-            Ok("Volume down".to_string())
-        }
-
-        "mute" => {
-            send_media_key(VK_VOLUME_MUTE);
-            Ok("Mute toggled".to_string())
-        }
-
-        "rdr2_cycle" => {
-            // RDR2 cycle (backup saves -> uninstall Rockstar Launcher ->
-            // silent fresh install) is orchestrated by the AHK engine
-            // (RunRdr2Cycle in steam_mode.ahk).
-            Ok("RDR2 cycle handled by AHK engine".to_string())
-        }
-
-        _ => Err(format!("Unknown action type: {}", action_type)),
-    }
-}
-
-fn send_media_key(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
-    };
-    unsafe {
-        let down = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    dwFlags: KEYEVENTF_EXTENDEDKEY,
-                    ..Default::default()
-                },
-            },
-        };
-        let up = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    ..Default::default()
-                },
-            },
-        };
-        let _ = SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
-fn make_key_input(vk: u16, key_up: bool) -> INPUT {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    };
-    let flags = if key_up {
-        KEYEVENTF_KEYUP
-    } else {
-        KEYEVENTF_EXTENDEDKEY
-    };
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(vk),
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    }
-}
-
-fn key_name_to_vk(name: &str) -> Option<u16> {
-    match name {
-        "ctrl" | "control" => Some(0x11),
-        "alt" | "menu" => Some(0x12),
-        "shift" => Some(0x10),
-        "win" | "super" | "meta" => Some(0x5B),
-        "enter" | "return" => Some(0x0D),
-        "tab" => Some(0x09),
-        "esc" | "escape" => Some(0x1B),
-        "space" | " " => Some(0x20),
-        "backspace" => Some(0x08),
-        "delete" | "del" => Some(0x2E),
-        "insert" | "ins" => Some(0x2D),
-        "home" => Some(0x24),
-        "end" => Some(0x23),
-        "pageup" | "pgup" => Some(0x21),
-        "pagedown" | "pgdn" => Some(0x22),
-        "up" | "arrowup" => Some(0x26),
-        "down" | "arrowdown" => Some(0x28),
-        "left" | "arrowleft" => Some(0x25),
-        "right" | "arrowright" => Some(0x27),
-        "f1" => Some(0x70),
-        "f2" => Some(0x71),
-        "f3" => Some(0x72),
-        "f4" => Some(0x73),
-        "f5" => Some(0x74),
-        "f6" => Some(0x75),
-        "f7" => Some(0x76),
-        "f8" => Some(0x77),
-        "f9" => Some(0x78),
-        "f10" => Some(0x79),
-        "f11" => Some(0x7A),
-        "f12" => Some(0x7B),
-        "a" => Some(0x41),
-        "b" => Some(0x42),
-        "c" => Some(0x43),
-        "d" => Some(0x44),
-        "e" => Some(0x45),
-        "f" => Some(0x46),
-        "g" => Some(0x47),
-        "h" => Some(0x48),
-        "i" => Some(0x49),
-        "j" => Some(0x4A),
-        "k" => Some(0x4B),
-        "l" => Some(0x4C),
-        "m" => Some(0x4D),
-        "n" => Some(0x4E),
-        "o" => Some(0x4F),
-        "p" => Some(0x50),
-        "q" => Some(0x51),
-        "r" => Some(0x52),
-        "s" => Some(0x53),
-        "t" => Some(0x54),
-        "u" => Some(0x55),
-        "v" => Some(0x56),
-        "w" => Some(0x57),
-        "x" => Some(0x58),
-        "y" => Some(0x59),
-        "z" => Some(0x5A),
-        "0" => Some(0x30),
-        "1" => Some(0x31),
-        "2" => Some(0x32),
-        "3" => Some(0x33),
-        "4" => Some(0x34),
-        "5" => Some(0x35),
-        "6" => Some(0x36),
-        "7" => Some(0x37),
-        "8" => Some(0x38),
-        "9" => Some(0x39),
-        "printscreen" | "prtsc" => Some(0x2C),
-        "capslock" => Some(0x14),
-        "numlock" => Some(0x90),
-        "scrolllock" => Some(0x91),
-        _ => None,
-    }
+fn import_config(
+    config: String,
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+) -> Result<(), String> {
+    core.replace_config_json(&config)?;
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(())
 }
 
 #[tauri::command]
-fn get_gaming_mode() -> Result<bool, String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::VK_SCROLL;
-    unsafe {
-        let state = GetKeyState(VK_SCROLL.0 as i32);
-        Ok((state & 1) != 0)
+fn list_config_backups(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let name = entry.map_err(|e| e.to_string())?.file_name().to_string_lossy().into_owned();
+        let stamp = name.strip_prefix("config.json.bak-").unwrap_or("");
+        if !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()) {
+            names.push(name);
+        }
     }
+    names.sort();
+    names.reverse();
+    Ok(names)
 }
 
 #[tauri::command]
-fn get_keyboard_connected() -> Result<bool, String> {
-    Ok(true)
+fn restore_config_backup(
+    name: String,
+    app: tauri::AppHandle,
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+) -> Result<(), String> {
+    let stamp = name.strip_prefix("config.json.bak-").unwrap_or("");
+    if stamp.is_empty() || !stamp.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Invalid backup name".to_string());
+    }
+    let path = config_path(&app)
+        .parent()
+        .ok_or("cannot resolve config directory")?
+        .join(&name);
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    models::AppConfig::from_json(&text)?;
+
+    // Keep the current config recoverable before overwriting it.
+    core.backup_current_config()?;
+    core.replace_config_json(&text)?;
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(())
 }
+
+// --------------------------------------------------------------------------
+// profiles
+// --------------------------------------------------------------------------
+
+#[tauri::command]
+fn list_profiles(
+    core: tauri::State<'_, Arc<AppCore>>,
+) -> Result<serde_json::Value, String> {
+    let profiles = core.config().profiles;
+    Ok(serde_json::json!(profiles))
+}
+
+#[tauri::command]
+fn create_profile(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let profile = profiles::create(&core.inner().clone(), &name)?;
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(serde_json::json!({ "profile": profile, "state": core.state_json(&keyboard.status()) }))
+}
+
+#[tauri::command]
+fn rename_profile(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    profile_id: String,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    profiles::rename(&core.inner().clone(), &profile_id, &name)?;
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(core.state_json(&keyboard.status()))
+}
+
+#[tauri::command]
+fn duplicate_profile(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    profile_id: String,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let profile = profiles::duplicate(&core.inner().clone(), &profile_id, &name)?;
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(serde_json::json!({ "profile": profile, "state": core.state_json(&keyboard.status()) }))
+}
+
+#[tauri::command]
+fn delete_profile(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    profile_id: String,
+) -> Result<serde_json::Value, String> {
+    profiles::delete(&core.inner().clone(), &profile_id)?;
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(core.state_json(&keyboard.status()))
+}
+
+#[tauri::command]
+fn set_active_profile(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    profile_id: String,
+) -> Result<serde_json::Value, String> {
+    profiles::set_active(&core.inner().clone(), &profile_id)?;
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+    Ok(core.state_json(&keyboard.status()))
+}
+
+// --------------------------------------------------------------------------
+// system helpers used by the editor
+// --------------------------------------------------------------------------
 
 #[tauri::command]
 fn list_audio_devices(sound_volume_view_path: String) -> Result<Vec<String>, String> {
@@ -405,11 +477,7 @@ fn list_audio_devices(sound_volume_view_path: String) -> Result<Vec<String>, Str
         sound_volume_view_path
     };
 
-    let out_file = std::env::temp_dir().join(format!(
-        "svv_{}.csv",
-        std::process::id()
-    ));
-
+    let out_file = std::env::temp_dir().join(format!("svv_{}.csv", std::process::id()));
     let out_path = out_file
         .to_str()
         .ok_or("invalid temp path")?
@@ -428,7 +496,6 @@ fn list_audio_devices(sound_volume_view_path: String) -> Result<Vec<String>, Str
     let mut content = fs::read_to_string(&out_file).unwrap_or_default();
     let _ = fs::remove_file(&out_file);
 
-    // Strip UTF-8 BOM if present
     if content.starts_with('\u{FEFF}') {
         content = content.trim_start_matches('\u{FEFF}').to_string();
     }
@@ -438,22 +505,21 @@ fn list_audio_devices(sound_volume_view_path: String) -> Result<Vec<String>, Str
         return Ok(fallback_audio_devices());
     }
 
-    // Parse CSV respecting quotes
     let parse_csv_line = |line: &str| -> Vec<String> {
         let mut fields = Vec::new();
-        let mut cur = String::new();
+        let mut current = String::new();
         let mut in_quotes = false;
         for c in line.chars() {
             match c {
                 '"' => in_quotes = !in_quotes,
                 ',' if !in_quotes => {
-                    fields.push(cur.trim().to_string());
-                    cur = String::new();
+                    fields.push(current.trim().to_string());
+                    current = String::new();
                 }
-                _ => cur.push(c),
+                _ => current.push(c),
             }
         }
-        fields.push(cur.trim().to_string());
+        fields.push(current.trim().to_string());
         fields
     };
 
@@ -490,6 +556,25 @@ fn list_audio_devices(sound_volume_view_path: String) -> Result<Vec<String>, Str
     }
 }
 
+fn fallback_audio_devices() -> Vec<String> {
+    let output = StdCommand::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance -ClassName Win32_SoundDevice | Select-Object -ExpandProperty Name",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 #[tauri::command]
 fn list_lnk_files(folder: String) -> Result<Vec<String>, String> {
     let folder = folder.trim();
@@ -520,24 +605,9 @@ fn list_lnk_files(folder: String) -> Result<Vec<String>, String> {
     Ok(result)
 }
 
-fn fallback_audio_devices() -> Vec<String> {
-    let output = StdCommand::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-CimInstance -ClassName Win32_SoundDevice | Select-Object -ExpandProperty Name",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-
-    output
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
-}
+// --------------------------------------------------------------------------
+// image search (editor helper)
+// --------------------------------------------------------------------------
 
 #[derive(serde::Serialize)]
 struct ImageSearchResult {
@@ -663,11 +733,11 @@ async fn search_bing(
 
     while let Some(pos) = html[index..].find(MURL) {
         let start = index + pos + MURL.len();
-        let Some(rel_end) = html[start..].find("&quot;") else {
+        let Some(relative_end) = html[start..].find("&quot;") else {
             break;
         };
-        let murl = &html[start..start + rel_end];
-        index = start + rel_end;
+        let murl = &html[start..start + relative_end];
+        index = start + relative_end;
 
         if !murl.starts_with("http") || !seen.insert(murl.to_string()) {
             continue;
@@ -702,29 +772,30 @@ async fn search_images(
     api_key: String,
     source: String,
 ) -> Result<Vec<ImageSearchResult>, String> {
-    let query = query.trim();
+    let query = query.trim().to_string();
     if query.is_empty() {
         return Err("Enter something to search for".to_string());
     }
 
     let client = http_client()?;
-    let api_key = api_key.trim();
+    let api_key = api_key.trim().to_string();
 
     match source.trim().to_ascii_lowercase().as_str() {
-        "web" => search_bing(&client, query).await,
+        "web" => search_bing(&client, &query).await,
         "steamgriddb" => {
             if api_key.is_empty() {
                 return Err("Add a SteamGridDB API key to use this source".to_string());
             }
-            search_steamgriddb(&client, query, api_key).await
+            search_steamgriddb(&client, &query, &api_key).await
         }
         _ => {
             if api_key.is_empty() {
-                return search_bing(&client, query).await;
-            }
-            match search_steamgriddb(&client, query, api_key).await {
-                Ok(results) => Ok(results),
-                Err(_) => search_bing(&client, query).await,
+                search_bing(&client, &query).await
+            } else {
+                match search_steamgriddb(&client, &query, &api_key).await {
+                    Ok(results) => Ok(results),
+                    Err(_) => search_bing(&client, &query).await,
+                }
             }
         }
     }
@@ -842,6 +913,90 @@ async fn download_image(
     Ok(file.to_string_lossy().to_string())
 }
 
+// --------------------------------------------------------------------------
+// window / tray
+// --------------------------------------------------------------------------
+
+#[tauri::command]
+fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.hide().map_err(|e| e.to_string())
+    } else {
+        Err("main window not found".to_string())
+    }
+}
+
+#[tauri::command]
+fn show_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())
+    } else {
+        Err("main window not found".to_string())
+    }
+}
+
+#[tauri::command]
+fn quit_app(
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    devices.stop();
+    keyboard.stop();
+    logging::info("quit requested");
+    app.exit(0);
+    Ok(())
+}
+
+fn load_minimize_setting(app: &tauri::AppHandle) -> Option<bool> {
+    let path = config_path(app);
+    let content = fs::read_to_string(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    Some(
+        value
+            .get("settings")
+            .and_then(|s| s.get("general"))
+            .and_then(|g| g.get("minimizeToTray"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+}
+
+// --------------------------------------------------------------------------
+// phone remote
+// --------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_remote_info(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<server::RemoteState>>,
+) -> server::RemoteInfo {
+    server::info(&app, state.inner())
+}
+
+#[tauri::command]
+fn set_remote_enabled(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<server::RemoteState>>,
+    enabled: bool,
+) -> Result<server::RemoteInfo, String> {
+    server::set_enabled(&app, state.inner(), enabled)?;
+    Ok(server::info(&app, state.inner()))
+}
+
+#[tauri::command]
+fn regenerate_pairing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<server::RemoteState>>,
+) -> server::RemoteInfo {
+    server::regenerate(&app, state.inner())
+}
+
+// --------------------------------------------------------------------------
+// bootstrap
+// --------------------------------------------------------------------------
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -850,10 +1005,55 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            setup_tray(app.handle())?;
+            let log_dir = app
+                .path()
+                .app_config_dir()
+                .map(|dir| dir.join("logs"))
+                .unwrap_or_else(|_| std::env::temp_dir());
+            logging::init(log_dir);
+
+            let core = AppCore::new(app.handle().clone());
+            let (device_tx, device_rx) = channel::<DeviceKeyEvent>();
+            let keyboard = KeyboardManager::new(core.clone(), device_rx);
+            let devices = RawInputManager::new(app.handle().clone(), device_tx);
+            RawInputManager::install(devices.clone());
+
+            // Manage before starting: the device worker resolves the keyboard
+            // manager through Tauri state when deciding whether macros are
+            // paused.
+            app.manage(core.clone());
+            app.manage(keyboard.clone());
+            app.manage(devices.clone());
+
+            match keyboard.start() {
+                Ok(()) => logging::info("native keyboard observer started"),
+                Err(error) => logging::error(format!("keyboard observer failed: {}", error)),
+            }
+            match devices.start() {
+                Ok(()) => logging::info("Raw Input keypad listener started"),
+                Err(error) => logging::error(format!("Raw Input listener failed: {}", error)),
+            }
+
+            let remote_state = Arc::new(server::RemoteState::new());
+            server::boot(app.handle(), &remote_state);
+
+            tray::setup(app.handle(), core.clone(), keyboard.clone())?;
+
+            app.manage(remote_state);
+
+            logging::info("AYMAN MACRO DECK ready");
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(devices) = window.app_handle().try_state::<Arc<RawInputManager>>() {
+                    devices.stop();
+                }
+                if let Some(keyboard) = window.app_handle().try_state::<Arc<KeyboardManager>>() {
+                    keyboard.stop();
+                }
+                return;
+            }
             if let Some(config) = load_minimize_setting(window.app_handle()) {
                 if !config {
                     return;
@@ -877,114 +1077,47 @@ pub fn run() {
             save_config,
             reload_ahk_script,
             execute_action,
+            trigger_button,
+            get_app_state,
             get_gaming_mode,
+            set_gaming_mode,
             get_keyboard_connected,
+            set_shortcuts_paused,
+            reload_shortcuts,
+            get_keyboard_devices,
+            refresh_keyboard_devices,
+            get_selected_macro_device,
+            select_macro_device,
+            clear_macro_device_selection,
+            start_device_test,
+            stop_device_test,
+            get_device_test_candidate,
+            confirm_device_test,
+            get_macro_engine_status,
+            set_macro_engine_running,
+            set_macro_device_collections,
+            open_logs_folder,
+            export_config,
+            import_config,
+            list_config_backups,
+            restore_config_backup,
+            list_profiles,
+            create_profile,
+            rename_profile,
+            duplicate_profile,
+            delete_profile,
+            set_active_profile,
             list_audio_devices,
             list_lnk_files,
             search_images,
             download_image,
             hide_window,
             show_window,
-            quit_app
+            quit_app,
+            get_remote_info,
+            set_remote_enabled,
+            regenerate_pairing
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-fn load_minimize_setting(app: &tauri::AppHandle) -> Option<bool> {
-    let path = config_path(app);
-    let content = fs::read_to_string(&path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    Some(
-        value
-            .get("settings")
-            .and_then(|s| s.get("general"))
-            .and_then(|g| g.get("minimizeToTray"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-    )
-}
-
-#[tauri::command]
-fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        window.hide().map_err(|e| e.to_string())
-    } else {
-        Err("main window not found".to_string())
-    }
-}
-
-#[tauri::command]
-fn show_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())
-    } else {
-        Err("main window not found".to_string())
-    }
-}
-
-#[tauri::command]
-fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
-    // Force close all windows to exit the process
-    app.exit(0);
-    Ok(())
-}
-
-fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| tauri::Error::AssetNotFound("window icon".into()))?;
-
-    let show_i = tauri::menu::MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-    let hide_i = tauri::menu::MenuItem::with_id(app, "hide", "Hide", true, None::<&str>)?;
-    let quit_i = tauri::menu::MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-
-    let menu = tauri::menu::Menu::with_items(
-        app,
-        &[&show_i, &hide_i, &tauri::menu::PredefinedMenuItem::separator(app)?, &quit_i],
-    )?;
-
-    let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
-        .icon(icon)
-        .tooltip("AYMAN MACRO DECK")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
-            }
-            "hide" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
-            }
-            "quit" => {
-                app.exit(0);
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let tauri::tray::TrayIconEvent::Click {
-                button: tauri::tray::MouseButton::Left,
-                button_state: tauri::tray::MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
-            }
-        })
-        .build(app)?;
-
-    Ok(())
 }

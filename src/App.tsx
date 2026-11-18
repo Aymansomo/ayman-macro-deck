@@ -1,11 +1,31 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Header } from "./components/Header";
-import { ButtonGrid } from "./components/ButtonGrid";
+import { DashboardBar } from "./components/DashboardBar";
+import { KeyboardEditor } from "./components/KeyboardEditor";
 import { ButtonEditor } from "./components/ButtonEditor";
 import { StatusBar } from "./components/StatusBar";
+import { DeviceManagerPanel } from "./components/DeviceManagerPanel";
+import {
+  getMacroEngineStatus,
+  listenDeviceEvent,
+  listenMacroAction,
+  listenMacroKey,
+  type MacroActionEvent,
+  type MacroEngineStatus,
+} from "./lib/backend";
 import { useAppStore } from "./store";
 import type { AppConfig } from "./types";
+
+interface RecentAction {
+  id: string;
+  buttonId: string;
+  buttonName: string;
+  keyId?: string;
+  message: string;
+  ok: boolean;
+  at: number;
+}
 
 function App() {
   const loadConfig = useAppStore((s) => s.loadConfig);
@@ -14,6 +34,30 @@ function App() {
   const setKeyboardConnected = useAppStore((s) => s.setKeyboardConnected);
   const config = useAppStore((s) => s.config);
   const [selectedButtonId, setSelectedButtonId] = useState<string | null>(null);
+  const [deviceManagerOpen, setDeviceManagerOpen] = useState(false);
+  const [engineStatus, setEngineStatus] = useState<MacroEngineStatus | null>(null);
+  const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
+  const [runningButtonId, setRunningButtonId] = useState<string | null>(null);
+  const [recentActions, setRecentActions] = useState<RecentAction[]>([]);
+
+  const appendRecentAction = useCallback((event: MacroActionEvent, ok: boolean) => {
+    const message =
+      event.results?.find(Boolean) ?? (ok ? "Completed" : "Action error");
+    setRecentActions((prev) =>
+      [
+        {
+          id: crypto.randomUUID(),
+          buttonId: event.buttonId,
+          buttonName: event.buttonName,
+          keyId: event.keyId,
+          message,
+          ok,
+          at: Date.now(),
+        },
+        ...prev,
+      ].slice(0, 6),
+    );
+  }, []);
 
   useEffect(() => {
     invoke<string>("load_config")
@@ -61,6 +105,67 @@ function App() {
     }, [loadConfig, setGamingMode, setKeyboardConnected]);
 
   useEffect(() => {
+    const poll = () => {
+      void getMacroEngineStatus().then(setEngineStatus).catch(() => {});
+    };
+    poll();
+    const timer = setInterval(poll, 2000);
+    const subscriptions = [
+      // This event carries only DeviceStatus. Always re-read the full
+      // MacroEngineStatus instead of casting the partial payload, otherwise
+      // engineStatus.keyboard becomes undefined and the UI crashes.
+      listenDeviceEvent("keyboard-engine-status-changed", () => {
+        poll();
+      }),
+      listenDeviceEvent("keyboard-device-selected", () => poll()),
+      listenDeviceEvent("keyboard-device-added", () => poll()),
+      listenDeviceEvent("keyboard-device-removed", () => poll()),
+    ];
+    return () => {
+      clearInterval(timer);
+      void Promise.all(subscriptions).then((unsubscribers) => {
+        unsubscribers.forEach((off) => off());
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    const keySubscriptions = [
+      listenMacroKey("macro-key-pressed", ({ keyId }) => {
+        setActiveKeys((prev) => new Set(prev).add(keyId));
+      }),
+      listenMacroKey("macro-key-released", ({ keyId }) => {
+        setActiveKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(keyId);
+          return next;
+        });
+      }),
+    ];
+
+    const actionSubscriptions = [
+      listenMacroAction("macro-action-started", ({ buttonId }) => {
+        setRunningButtonId(buttonId);
+      }),
+      listenMacroAction("macro-action-completed", (event: MacroActionEvent) => {
+        setRunningButtonId(null);
+        appendRecentAction(event, true);
+      }),
+      listenMacroAction("macro-action-error", (event: MacroActionEvent) => {
+        setRunningButtonId(null);
+        appendRecentAction(event, false);
+      }),
+    ];
+
+    const all = [...keySubscriptions, ...actionSubscriptions];
+    return () => {
+      void Promise.all(all).then((unsubscribers) => {
+        unsubscribers.forEach((off) => off());
+      });
+    };
+  }, [appendRecentAction]);
+
+  useEffect(() => {
     const timeout = setTimeout(() => saveConfig(), 500);
     return () => clearTimeout(timeout);
   }, [config, saveConfig]);
@@ -81,17 +186,57 @@ function App() {
 
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg-primary)]">
-      <Header />
+      <Header
+        engineStatus={engineStatus}
+        onOpenDeviceManager={() => setDeviceManagerOpen(true)}
+      />
       <div className="flex flex-1 min-h-0">
-        <ButtonGrid
-          selectedButtonId={selectedButtonId}
-          onSelectButton={handleSelectButton}
-        />
+        <div className="flex flex-col flex-1 min-w-0">
+          <DashboardBar
+            engineStatus={engineStatus}
+            recentActions={recentActions}
+            onOpenDeviceManager={() => setDeviceManagerOpen(true)}
+            onEngineStatusChange={setEngineStatus}
+          />
+          {activeProfile ? (
+            <KeyboardEditor
+              profile={activeProfile}
+              selectedButtonId={selectedButtonId}
+              activeKeys={activeKeys}
+              runningButtonId={runningButtonId}
+              onSelectButton={handleSelectButton}
+            />
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)]">
+              No profile selected
+            </div>
+          )}
+        </div>
         {selectedButton && (
-          <ButtonEditor button={selectedButton} onClose={handleCloseEditor} />
+          <ButtonEditor
+            button={selectedButton}
+            onClose={handleCloseEditor}
+            running={runningButtonId === selectedButton.id}
+            lastAction={recentActions.find(
+              (action) => action.buttonId === selectedButton.id,
+            )}
+          />
         )}
       </div>
-      <StatusBar />
+      <StatusBar engineStatus={engineStatus} />
+      <DeviceManagerPanel
+        open={deviceManagerOpen}
+        onClose={() => setDeviceManagerOpen(false)}
+        selectedButtonId={selectedButtonId}
+        onAssignKey={(keyId) => {
+          if (!selectedButtonId) return false;
+          const ok = useAppStore
+            .getState()
+            .setButtonPhysicalKey(selectedButtonId, keyId);
+          if (ok) void useAppStore.getState().saveConfig();
+          return ok;
+        }}
+      />
     </div>
   );
 }

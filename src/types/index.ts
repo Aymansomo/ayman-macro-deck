@@ -6,10 +6,16 @@ export interface ButtonAction {
   delayAfter?: number;
 }
 
+export type KeyboardLayout = "full" | "numpad" | "numpadNav";
+
 export interface MacroButton {
   id: string;
   key: number;
   keyName?: string;
+  /** Stable Raw Input identity; preferred over the legacy `key` slot. */
+  physicalKeyId?: string;
+  /** Explicit physical trigger written for keys outside the legacy 1-11 slots. */
+  trigger?: string;
   name: string;
   icon: string;
   imagePath?: string;
@@ -23,6 +29,7 @@ export interface MacroButton {
 export interface Profile {
   id: string;
   name: string;
+  layout?: KeyboardLayout;
   buttons: MacroButton[];
   createdAt: number;
   updatedAt: number;
@@ -59,13 +66,6 @@ export interface AppSettings {
     accentColor: string;
     buttonSize: number;
     gridSize: number;
-  };
-  rdr2: {
-    savesPath: string;
-    backupPath: string;
-    installerPath: string;
-    uninstallCommand: string;
-    confirmBeforeUninstall: boolean;
   };
   images: {
     steamgriddbApiKey: string;
