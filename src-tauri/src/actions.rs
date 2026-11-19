@@ -496,6 +496,9 @@ pub fn run_button(core: &AppCore, button: &MacroButton) -> Vec<String> {
             }
             Ok(Outcome::SwitchProfile(profile)) => {
                 core.apply_profile_switch(&profile);
+                if let Err(error) = core.persist() {
+                    crate::logging::warn(format!("could not persist profile switch: {}", error));
+                }
                 results.push(format!("Switched to {} profile", profile));
             }
             Err(error) => {

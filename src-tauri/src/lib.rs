@@ -606,6 +606,106 @@ fn list_lnk_files(folder: String) -> Result<Vec<String>, String> {
 }
 
 // --------------------------------------------------------------------------
+// application picker (editor helper)
+// --------------------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplicationInfo {
+    path: String,
+    name: String,
+    icon_path: Option<String>,
+}
+
+/// Returns a chosen executable's display name and a cached PNG of its icon.
+/// Icon extraction uses Windows' own shell icon provider via System.Drawing so
+/// `.exe` and `.lnk` files resolve to the same image Explorer shows.
+#[tauri::command]
+fn get_application_info(app: tauri::AppHandle, path: String) -> Result<ApplicationInfo, String> {
+    let source = PathBuf::from(&path);
+    if !source.is_file() {
+        return Err(format!("File not found: {}", path));
+    }
+
+    let name = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("Application")
+        .to_string();
+
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("images");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let safe_name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_name = if safe_name.trim_matches('_').is_empty() {
+        "app".to_string()
+    } else {
+        safe_name.chars().take(40).collect()
+    };
+
+    // "v2" busts icons cached before shortcut targets were resolved. The v1
+    // cache stored the shell shortcut icon, which includes the arrow overlay
+    // in the bottom-left corner.
+    let icon = dir.join(format!(
+        "app_{}_{:08x}.png",
+        safe_name,
+        fnv_hash(&format!("v2:{}", path))
+    ));
+    if !icon.exists() {
+        // Resolve .lnk shortcuts to their target executable first. Calling
+        // ExtractAssociatedIcon directly on a shortcut returns the shell's
+        // shortcut icon (with the arrow overlay) instead of the real app icon.
+        let script = "& { param($p, $d) Add-Type -AssemblyName System.Drawing; $src = $p; if ($p -like '*.lnk') { $sh = New-Object -ComObject WScript.Shell; $sc = $sh.CreateShortcut($p); if ($sc.TargetPath -and (Test-Path $sc.TargetPath)) { $src = $sc.TargetPath } }; $i = [System.Drawing.Icon]::ExtractAssociatedIcon($src); if ($null -eq $i) { exit 1 }; $b = $i.ToBitmap(); $b.Save($d, [System.Drawing.Imaging.ImageFormat]::Png); $b.Dispose(); $i.Dispose() }";
+        let icon_arg = icon.to_string_lossy().to_string();
+        let output = StdCommand::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+                path.as_str(),
+                icon_arg.as_str(),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("Could not read application icon: {}", e))?;
+
+        if !output.status.success() {
+            logging::error(format!(
+                "could not extract icon for {}: {}",
+                path,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+            return Ok(ApplicationInfo {
+                path,
+                name,
+                icon_path: None,
+            });
+        }
+    }
+
+    Ok(ApplicationInfo {
+        path,
+        name,
+        icon_path: Some(icon.to_string_lossy().to_string()),
+    })
+}
+
+// --------------------------------------------------------------------------
 // image search (editor helper)
 // --------------------------------------------------------------------------
 
@@ -1109,6 +1209,7 @@ pub fn run() {
             set_active_profile,
             list_audio_devices,
             list_lnk_files,
+            get_application_info,
             search_images,
             download_image,
             hide_window,

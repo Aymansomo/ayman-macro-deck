@@ -8,6 +8,7 @@ import { StatusBar } from "./components/StatusBar";
 import { DeviceManagerPanel } from "./components/DeviceManagerPanel";
 import {
   getMacroEngineStatus,
+  listenDeckState,
   listenDeviceEvent,
   listenMacroAction,
   listenMacroKey,
@@ -30,6 +31,7 @@ interface RecentAction {
 function App() {
   const loadConfig = useAppStore((s) => s.loadConfig);
   const saveConfig = useAppStore((s) => s.saveConfig);
+  const setActiveProfile = useAppStore((s) => s.setActiveProfile);
   const setGamingMode = useAppStore((s) => s.setGamingMode);
   const setKeyboardConnected = useAppStore((s) => s.setKeyboardConnected);
   const config = useAppStore((s) => s.config);
@@ -165,6 +167,33 @@ function App() {
     };
   }, [appendRecentAction]);
 
+  // A profile-switch button pressed on the physical keypad changes the profile
+  // inside the backend. Mirror it into the store so the editor, dashboard and
+  // config autosave do not keep showing (or writing back) the old profile.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listenDeckState((state) => {
+      const current = useAppStore.getState();
+      if (
+        state.activeProfileId &&
+        state.activeProfileId !== current.config.activeProfileId
+      ) {
+        setActiveProfile(state.activeProfileId);
+      }
+      if (state.gamingMode !== current.isGamingMode) {
+        setGamingMode(state.gamingMode);
+      }
+    }).then((off) => {
+      if (cancelled) off();
+      else unlisten = off;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [setActiveProfile, setGamingMode]);
+
   useEffect(() => {
     const timeout = setTimeout(() => saveConfig(), 500);
     return () => clearTimeout(timeout);
@@ -185,13 +214,13 @@ function App() {
     activeProfile?.buttons.find((b) => b.id === selectedButtonId) ?? null;
 
   return (
-    <div className="flex flex-col h-full bg-[var(--color-bg-primary)]">
+    <div className="app-shell">
       <Header
         engineStatus={engineStatus}
         onOpenDeviceManager={() => setDeviceManagerOpen(true)}
       />
-      <div className="flex flex-1 min-h-0">
-        <div className="flex flex-col flex-1 min-w-0">
+      <div className="app-main">
+        <div className="app-workspace">
           <DashboardBar
             engineStatus={engineStatus}
             recentActions={recentActions}

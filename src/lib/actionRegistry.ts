@@ -159,10 +159,10 @@ export const ACTION_REGISTRY: ActionDefinition[] = [
   {
     type: "switch_profile",
     name: "Switch Profile",
-    description: "Switch to another profile (Gaming/Normal)",
+    description: "Jump to any profile when this button's key is pressed",
     icon: "🔄",
     paramSchema: [
-      { key: "profile", label: "Profile", type: "select", placeholder: "Gaming / Normal" },
+      { key: "profile", label: "Switch to profile", type: "select", placeholder: "Choose a profile" },
     ],
     async loadOptions() {
       const profiles = useAppStore.getState().config.profiles;

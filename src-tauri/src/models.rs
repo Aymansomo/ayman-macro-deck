@@ -183,9 +183,18 @@ impl AppConfig {
             .find(|p| p.name.eq_ignore_ascii_case(name))
     }
 
-    /// Profile the keyboard engine acts on: `Gaming` while gaming mode is on,
-    /// otherwise `Normal`, falling back to the editor's active profile.
+    /// Profile the keyboard engine acts on. `Gaming`/`Normal` follow the mode
+    /// flag, but an explicitly selected custom profile (e.g. "Work") wins so a
+    /// button can jump to any profile, not just the mode pair.
     pub fn active_profile(&self, gaming: bool) -> Option<&Profile> {
+        if let Some(active) = self.profile(&self.active_profile_id) {
+            let is_mode_profile = active.name.eq_ignore_ascii_case("Gaming")
+                || active.name.eq_ignore_ascii_case("Normal");
+            if !is_mode_profile {
+                return Some(active);
+            }
+        }
+
         self.profile_by_name(if gaming { "Gaming" } else { "Normal" })
             .or_else(|| self.profile(&self.active_profile_id))
             .or_else(|| self.profiles.first())
@@ -444,6 +453,30 @@ mod tests {
             "n",
             "falls back to activeProfileId when no Gaming profile exists"
         );
+    }
+
+    #[test]
+    fn active_profile_honors_selected_custom_profile() {
+        let mut config = AppConfig {
+            active_profile_id: "work".into(),
+            profiles: vec![
+                profile("g", "Gaming", vec![1]),
+                profile("n", "Normal", vec![1]),
+                profile("work", "Work", vec![1]),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(config.active_profile(true).unwrap().name, "Work");
+        assert_eq!(config.active_profile(false).unwrap().name, "Work");
+
+        config.active_profile_id = "n".into();
+        assert_eq!(
+            config.active_profile(true).unwrap().name,
+            "Gaming",
+            "mode selection resumes once a mode profile is active"
+        );
+        assert_eq!(config.active_profile(false).unwrap().name, "Normal");
     }
 
     #[test]

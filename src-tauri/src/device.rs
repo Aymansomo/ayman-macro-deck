@@ -35,8 +35,8 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostQuitMessage,
     PostThreadMessageW, RegisterClassW, TranslateMessage, UnregisterClassW, WNDCLASSW,
-    RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, GIDC_ARRIVAL, GIDC_REMOVAL, HWND_MESSAGE, WM_DESTROY,
-    WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT,
+    RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, GIDC_ARRIVAL, GIDC_REMOVAL, HWND_MESSAGE, RIM_INPUT,
+    RIM_INPUTSINK, WM_DESTROY, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT,
 };
 
 use crate::keyid::KeyId;
@@ -633,6 +633,13 @@ unsafe fn device_path(handle: HANDLE) -> Option<String> {
     Some(text.trim_end_matches('\0').to_string())
 }
 
+/// Both values are valid `WM_INPUT` wParams. `RIM_INPUTSINK` means the app was
+/// not foreground when the key arrived, which is the whole point of
+/// `RIDEV_INPUTSINK` and must not be discarded.
+fn is_input_message(wparam: WPARAM) -> bool {
+    matches!(wparam.0 as u32 & 0xFF, RIM_INPUT | RIM_INPUTSINK)
+}
+
 unsafe extern "system" fn raw_window_proc(
     hwnd: HWND,
     message: u32,
@@ -645,8 +652,11 @@ unsafe extern "system" fn raw_window_proc(
 
     match message {
         WM_INPUT => {
-            // RIM_INPUT == 0. Ignore RIM_INPUTSINK (1) echoes.
-            if (wparam.0 as u32 & 0xFF) == 0 {
+            // RIM_INPUTSINK is not an echo: it is the event delivered while
+            // this app is in the background (enabled by RIDEV_INPUTSINK).
+            // Dropping it makes macros stop working as soon as another app
+            // takes focus.
+            if is_input_message(wparam) {
                 let mut size = 0u32;
                 let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
                 GetRawInputData(
@@ -805,6 +815,13 @@ mod tests {
             connected,
             selected: true,
         }
+    }
+
+    #[test]
+    fn background_raw_input_events_are_not_discarded() {
+        assert!(is_input_message(WPARAM(RIM_INPUT as usize)));
+        assert!(is_input_message(WPARAM(RIM_INPUTSINK as usize)));
+        assert!(!is_input_message(WPARAM(2)));
     }
 
     #[test]

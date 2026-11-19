@@ -11,7 +11,7 @@ export function StatusBar({ engineStatus }: Props) {
   const device = engineStatus?.device;
 
   return (
-    <div className="flex items-center justify-between px-5 py-2 border-t border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
+    <div className="status-bar">
       <div className="flex items-center gap-4">
         <ProfileSelector />
       </div>

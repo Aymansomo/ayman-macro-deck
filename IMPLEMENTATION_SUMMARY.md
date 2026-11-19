@@ -44,7 +44,9 @@ Constraints I followed:
 | Existing config/actions preserved after migration | ✅ Verified + backup created |
 | P0 Device Manager UI crash/status bugs | ✅ Code fixed; ⏳ awaiting your retest |
 | Production installer build (MSI + NSIS) | ✅ Verified, exit code 0 |
-| Updater signatures + local `latest.json` | ✅ Generated; ⏳ GitHub publish pending |
+| Responsive UI pass | ✅ Built/typechecked; measured key sizing, readable minimums, scroll instead of shrinking |
+| Open Application auto-fill picker | ✅ Built/typechecked; native file dialog + Windows icon/name extraction |
+| Updater signatures + `latest.json` | ✅ Generated, uploaded, and verified on the v0.1.4 GitHub release |
 | **Selected keypad triggers, main keyboard does not** | ⚠️ **NOT verified — needs two physical keyboards** |
 | Disconnect/reconnect, NumLock on/off, key repeat | ⚠️ Not tested — needs your hardware |
 | Hardware action regressions (Steam, audio, gaming mode), tray, phone API | ⚠️ Not regression-tested this pass |
@@ -151,6 +153,11 @@ Reworked `src-tauri/src/keyboard.rs`:
   **Remove assignment** with confirmation, and displays running/error state from action events.
   Saving still calls `reload_ahk_script`, which is now a compatibility shim that re-registers native
   bindings (`keyboard.reload()`) — it no longer launches AHK.
+- **Open Application picker:** adding that action immediately opens a native file dialog for `.exe`,
+  `.lnk`, `.bat`, `.cmd` or `.msi`. The new Rust command `get_application_info` resolves the app name
+  and caches the Windows Explorer icon as a PNG under `%APPDATA%\com.ayman.macrodeck\images\`. The
+  editor then auto-fills the action path, button name, button image and (when empty) description. A
+  **Choose app…** button next to the path field allows re-picking later.
 
 ### Stage 6 — Dashboard / status
 
@@ -215,11 +222,25 @@ Reworked `src-tauri/src/keyboard.rs`:
   updated, and user-level environment variables were set so future builds sign automatically.
 - The local version was bumped from **0.1.3 → 0.1.4** because GitHub already has a v0.1.3 release
   signed with the old key. Do **not** overwrite that release.
-- Both v0.1.4 installers and both `.sig` files were produced. A ready-to-publish v0.1.4
-  `latest.json` was generated at `src-tauri\target\release\bundle\latest.json`. Publishing it to a
-  new GitHub release is still a separate step.
+- Both v0.1.4 installers and both `.sig` files were produced. v0.1.4 `latest.json` was generated at
+  `src-tauri\target\release\bundle\latest.json`, then uploaded to the published v0.1.4 GitHub release.
+- Current source was pushed to `main` as commit `6d2e720`. The release is live at  
+  https://github.com/Aymansomo/ayman-macro-deck/releases/tag/v0.1.4
 - Existing v0.1.3 installations cannot auto-verify v0.1.4 with the old embedded public key. They
   need a one-time manual install of the v0.1.4 setup; after that, future updates use the new key.
+
+**Responsive UI polish (after the v0.1.4 release)**
+
+- `KeyboardView.tsx` measures the available canvas with `ResizeObserver` and computes key size from
+  the layout instead of using one fixed tiny unit. Numpad keys stay large; Full Keyboard keys keep a
+  readable 44px minimum and scroll when the window is too small instead of shrinking into illegibility.
+- `KeyboardKey.tsx` now scales label/icon/name fonts from `--key-unit`.
+- `index.css` adds grouped keyboard styling, safe centering, readable group titles, and responsive
+  breakpoints. Dashboard cards, header actions, dialogs, side panels and the Button Editor now adapt
+  to narrow windows; the full keyboard can scroll in both directions.
+- Row-span keys are positioned on a fixed row pitch so `+` / `Enter` no longer create extra blank rows.
+- These responsive changes were built and typechecked locally after the v0.1.4 release; they are not
+  in the published installer until pushed and released again.
 
 ---
 
@@ -235,7 +256,8 @@ Reworked `src-tauri/src/keyboard.rs`:
 | Release artifacts | `src-tauri\target\release\bundle\**` (MSI, NSIS, `.sig`, `latest.json`) |
 | External | **Nothing changed** in `E:\ayman\ME\Macro\script\steam_mode.ahk` or any config outside this repo |
 
-No commit, push, review or merge was performed — changes are local only.
+The v0.1.4 source was pushed to GitHub as commit `6d2e720`. The responsive UI changes made after
+that release are local-only until they are committed/pushed and published as a new version.
 
 ---
 
@@ -265,7 +287,9 @@ The app process was stopped after runtime verification. No device was selected b
 - ❌ Disconnect/reconnect of the USB keypad.
 - ❌ NumLock on/off, key repeat, arrow/navigation keys on real hardware.
 - ❌ Hardware action regressions: Steam shortcuts, audio switching, gaming mode, tray, phone API.
-- ⏳ Creating/publishing the GitHub v0.1.4 release with `latest.json` + installers + `.sig` files. Existing v0.1.3 users need a one-time manual reinstall.
+- ✅ GitHub v0.1.4 release published with `latest.json` + installers + `.sig` files:  
+  https://github.com/Aymansomo/ayman-macro-deck/releases/tag/v0.1.4  
+  Existing v0.1.3 users need a one-time manual reinstall.
 
 ---
 
@@ -402,8 +426,8 @@ pnpm tauri build
 
 ### Bottom line
 
-The code is built, tested, signed, and preserved your config. **The remaining work is yours:** retest
-the two Device Manager UI bugs, open Device Manager → Test Keyboard → press a key on the real USB
-keypad → Confirm, then run the two-keyboard isolation test in Step D. Publishing the generated
-`latest.json` to the GitHub release is also still pending. Send me the log and details if anything
-fails, and I will fix it.
+The code is built, tested, signed, pushed to GitHub, and published as v0.1.4; it also preserved your
+config. **The remaining work is yours:** retest the two Device Manager UI bugs, open Device Manager →
+Test Keyboard → press a key on the real USB keypad → Confirm, then run the two-keyboard isolation
+test in Step D. Existing v0.1.3 users need one manual reinstall because the signing key changed.
+Send me the log and details if anything fails, and I will fix it.

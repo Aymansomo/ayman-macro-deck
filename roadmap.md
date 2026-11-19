@@ -38,7 +38,7 @@
 6. ✅ **Log access in UI** — "Open logs folder" added to Profile Manager Tools.
 7. ✅ **Config tools in UI** — "Export config", "Import config", and restore-from-backup selector added to Profile Manager Tools.
 8. ✅ **Production installer build** — `pnpm tauri build` completes with exit code 0. MSI + NSIS installers and both updater `.sig` files are produced.
-9. 🟡 **Auto-updater release** — signing key/public key configured and v0.1.4 `latest.json` generated locally at `src-tauri\target\release\bundle\latest.json`. **Creating/publishing the v0.1.4 GitHub release is still pending/user action.** GitHub already has v0.1.3 with the old signing key, so it must not be overwritten.
+9. ✅ **Auto-updater release** — v0.1.4 source pushed to `main`, release published, and all signed assets uploaded: https://github.com/Aymansomo/ayman-macro-deck/releases/tag/v0.1.4 . GitHub still has v0.1.3 with the old signing key; it was not overwritten.
 
 ---
 
@@ -47,14 +47,17 @@
 1. 🟡 Update stale docs: `AGENTS.md` (AHK no longer executor), `PROJECT_STATE.md` (Phase 3), `README.md` (template). This roadmap and `IMPLEMENTATION_SUMMARY.md` are current.
 2. ⏳ Remove dead components `ButtonGrid.tsx` / `MacroButton.tsx` (no longer used by `App.tsx`).
 3. ✅/⏳ Tests: added Rust tests for VDF parsing, Steam executable enrichment, and opt-in multi-collection dispatch. Device worker and live-config migration tests remain a good future addition.
-4. ⏳ Record hardware test results in `IMPLEMENTATION_SUMMARY.md` after the user runs Step D.
+4. ✅ **Responsive UI pass** — measured keyboard sizing with readable minimums, scroll instead of shrunken keys, grouped/scrollable full layout, responsive dashboard/header/dialogs/side panels. Built and typechecked locally; not yet in a published installer.
+5. ✅ **Open Application picker** — adding the action opens a native file dialog; choosing an `.exe`/`.lnk` caches its Windows icon and auto-fills the button name, image and description. A "Choose app…" button allows re-picking.
+6. ⏳ Record hardware test results in `IMPLEMENTATION_SUMMARY.md` after the user runs Step D.
 
 ---
 
 ## Build / release status
 
-- `pnpm build` — passes.
+- `pnpm build` — passes (including the post-v0.1.4 responsive UI + application-picker changes).
 - `cargo test --manifest-path "src-tauri\Cargo.toml"` — **40 passed, 0 failed**.
+- Post-v0.1.4 UI changes are local-only; the published v0.1.4 installer does not include them yet.
 - `pnpm tauri build` — passes with updater signing env vars set at user level.
 - Signed artifacts (v0.1.4):
   - `src-tauri\target\release\bundle\msi\AYMAN MACRO DECK_0.1.4_x64_en-US.msi`
@@ -62,6 +65,8 @@
   - `src-tauri\target\release\bundle\nsis\AYMAN MACRO DECK_0.1.4_x64-setup.exe`
   - `src-tauri\target\release\bundle\nsis\AYMAN MACRO DECK_0.1.4_x64-setup.exe.sig`
   - `src-tauri\target\release\bundle\latest.json`
+- Published release: https://github.com/Aymansomo/ayman-macro-deck/releases/tag/v0.1.4
+- Pushed source commit: `6d2e720` on `main`
 - Private signing key: `C:\Users\Ayman\.tauri\ayman-macro-deck.key` (keep secret).
 - Public key is embedded in `src-tauri/tauri.conf.json`.
 - `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PATH`, and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are set at Windows user scope so future builds can sign updater artifacts.
@@ -73,5 +78,5 @@
 
 1. User retests the two P0 Device Manager bugs.
 2. User runs the P0 hardware tests, especially the two-keyboard isolation test.
-3. Create/publish the v0.1.4 GitHub release with `latest.json` + installers + `.sig` files. Tell existing v0.1.3 users to reinstall manually once.
+3. ✅ Published the v0.1.4 GitHub release with `latest.json` + installers + `.sig` files. Existing v0.1.3 users still need one manual reinstall.
 4. Record hardware results in `IMPLEMENTATION_SUMMARY.md`; then do P2 cleanup.

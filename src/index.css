@@ -88,3 +88,474 @@
 .animate-slideUp {
   animation: slideUp 0.2s ease-out;
 }
+
+:root {
+  --header-height: 68px;
+  --status-height: 48px;
+  --panel-radius: 12px;
+}
+
+.app-shell {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: var(--header-height) minmax(0, 1fr) var(--status-height);
+  background:
+    radial-gradient(circle at 80% -20%, rgba(124, 58, 237, 0.10), transparent 28rem),
+    var(--color-bg-primary);
+}
+
+.app-header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 18px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+  background: rgba(10, 10, 15, 0.88);
+  backdrop-filter: blur(14px);
+  z-index: 20;
+}
+
+.brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid rgba(167, 139, 250, 0.28);
+  border-radius: 10px;
+  background: linear-gradient(145deg, rgba(124, 58, 237, 0.24), rgba(124, 58, 237, 0.06));
+  color: #c4b5fd;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.brand-title {
+  font-size: 15px;
+  line-height: 1.1;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+
+.brand-subtitle {
+  margin-top: 4px;
+  color: var(--color-text-muted);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.header-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.app-main {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.app-workspace {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard {
+  flex: 0 0 auto;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+  background: rgba(18, 18, 26, 0.72);
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns:
+    minmax(145px, 0.8fr)
+    minmax(170px, 1fr)
+    minmax(145px, 0.8fr)
+    minmax(150px, 0.9fr)
+    minmax(180px, 1.1fr);
+  gap: 8px;
+}
+
+.dashboard-card {
+  min-width: 0;
+  min-height: 64px;
+  padding: 9px 11px;
+  border: 1px solid rgba(148, 163, 184, 0.10);
+  border-radius: 10px;
+  background: linear-gradient(145deg, rgba(26, 26, 46, 0.95), rgba(18, 18, 30, 0.95));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.dashboard-action {
+  border-color: rgba(124, 58, 237, 0.14);
+}
+
+.keyboard-toolbar {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+  background: rgba(18, 18, 26, 0.58);
+}
+
+.layout-switcher {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid rgba(148, 163, 184, 0.10);
+  border-radius: 9px;
+  background: rgba(26, 26, 46, 0.78);
+}
+
+.layout-switcher button {
+  min-height: 34px;
+}
+
+.keyboard-canvas {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  justify-content: safe center;
+  padding: clamp(12px, 2vw, 22px) clamp(12px, 2vw, 24px) clamp(18px, 3vw, 28px);
+  background:
+    linear-gradient(rgba(124, 58, 237, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(124, 58, 237, 0.018) 1px, transparent 1px),
+    rgba(8, 8, 14, 0.30);
+  background-size: 24px 24px;
+}
+
+.keyboard-groups {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  justify-content: center;
+  gap: clamp(14px, 2.4vw, 30px) clamp(16px, 2.8vw, 36px);
+}
+
+.keyboard-group {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: clamp(8px, 1.2vw, 12px);
+  border: 1px solid rgba(148, 163, 184, 0.10);
+  border-radius: 14px;
+  background: rgba(18, 18, 30, 0.60);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.keyboard-group-title {
+  margin-bottom: 8px;
+  color: var(--color-text-muted);
+  font-size: clamp(10px, 1vw, 12px);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.keyboard-rows {
+  position: relative;
+  min-width: 0;
+}
+
+.keyboard-row {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  min-height: var(--key-unit, 44px);
+}
+
+.keyboard-key {
+  width: var(--key-width);
+  height: var(--key-height);
+  min-width: var(--key-width);
+  min-height: var(--key-height);
+  border-radius: clamp(6px, calc(var(--key-unit, 44px) * 0.12), 11px) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.keyboard-key span {
+  pointer-events: none;
+}
+
+.keyboard-key .key-label {
+  font-size: clamp(12px, calc(var(--key-unit, 44px) * 0.23), 18px);
+}
+
+.keyboard-key .key-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: clamp(16px, calc(var(--key-unit, 44px) * 0.42), 30px);
+  height: clamp(16px, calc(var(--key-unit, 44px) * 0.42), 30px);
+  line-height: 1;
+}
+
+.keyboard-key .key-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.keyboard-key .key-icon .key-icon-fallback {
+  font-size: clamp(14px, calc(var(--key-unit, 44px) * 0.29), 22px);
+  line-height: 1;
+}
+
+.keyboard-key .key-name {
+  font-size: clamp(8px, calc(var(--key-unit, 44px) * 0.155), 12px);
+}
+
+.keyboard-key .key-assign {
+  font-size: clamp(7px, calc(var(--key-unit, 44px) * 0.14), 10px);
+}
+
+.keyboard-key:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.button-editor {
+  width: clamp(360px, 30vw, 420px);
+  height: 100%;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid rgba(148, 163, 184, 0.10);
+  background: rgba(18, 18, 26, 0.98);
+  animation: slideRight 0.25s ease-out;
+}
+
+.side-panel {
+  --panel-width: 420px;
+  width: min(var(--panel-width), 100vw);
+  height: 100%;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid rgba(148, 163, 184, 0.10);
+  background: var(--color-bg-secondary);
+  box-shadow: -18px 0 40px rgba(0, 0, 0, 0.34);
+  animation: slideRight 0.25s ease-out;
+}
+
+.device-panel {
+  --panel-width: 500px;
+}
+
+.profile-panel {
+  --panel-width: 380px;
+}
+
+.settings-panel {
+  --panel-width: 440px;
+}
+
+.steam-panel {
+  --panel-width: 420px;
+}
+
+.confirm-dialog {
+  width: min(380px, calc(100vw - 32px));
+  padding: clamp(20px, 4vw, 28px);
+}
+
+.status-bar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.10);
+  background: rgba(18, 18, 26, 0.96);
+}
+
+@media (max-width: 1050px) {
+  :root {
+    --header-height: 62px;
+  }
+
+  .app-header {
+    padding: 9px 12px;
+  }
+
+  .brand-subtitle {
+    display: none;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: repeat(3, minmax(150px, 1fr));
+  }
+
+  .dashboard-action {
+    grid-column: span 2;
+  }
+
+  .button-editor {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
+    left: auto;
+    z-index: 30;
+    width: min(420px, calc(100vw - 16px));
+    height: auto;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 14px;
+    box-shadow: -18px 0 40px rgba(0, 0, 0, 0.34);
+  }
+}
+
+@media (max-width: 760px) {
+  :root {
+    --header-height: 58px;
+    --status-height: 44px;
+  }
+
+  .app-header {
+    padding: 8px 10px;
+  }
+
+  .brand-mark {
+    width: 34px;
+    height: 34px;
+  }
+
+  .header-actions {
+    gap: 5px;
+  }
+
+  .header-actions > div {
+    display: none;
+  }
+
+  .header-actions button {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  .dashboard {
+    padding: 8px;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-card {
+    min-height: 60px;
+  }
+
+  .dashboard-action {
+    grid-column: span 2;
+  }
+
+  .keyboard-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .layout-switcher {
+    width: 100%;
+  }
+
+  .layout-switcher button {
+    flex: 1;
+    min-height: 34px;
+    padding-inline: 6px;
+  }
+
+  .keyboard-canvas {
+    justify-content: flex-start;
+    padding: 10px;
+  }
+
+  .keyboard-groups {
+    gap: 12px;
+  }
+
+  .button-editor {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    flex-basis: auto;
+  }
+
+  .button-editor > div:not(.fixed),
+  .side-panel > div {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .side-panel {
+    width: 100vw;
+    border-left: 0;
+  }
+
+  .status-bar {
+    padding-inline: 8px;
+  }
+
+  .status-bar > div:last-child {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  :root {
+    --header-height: 56px;
+  }
+
+  .brand-title {
+    display: none;
+  }
+
+  .brand-mark {
+    width: 32px;
+    height: 32px;
+  }
+
+  .dashboard-card {
+    padding: 8px;
+  }
+
+  .button-editor > div:not(.fixed),
+  .side-panel > div {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}

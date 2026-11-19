@@ -140,6 +140,16 @@ export function restoreConfigBackup(name: string) {
   return invoke<void>("restore_config_backup", { name });
 }
 
+export interface ApplicationInfo {
+  path: string;
+  name: string;
+  iconPath: string | null;
+}
+
+export function getApplicationInfo(path: string) {
+  return invoke<ApplicationInfo>("get_application_info", { path });
+}
+
 export function listenDeviceEvent(
   event:
     | "keyboard-device-added"
@@ -160,6 +170,18 @@ export function listenMacroAction(
   handler: (result: MacroActionEvent) => void,
 ) {
   return listen<MacroActionEvent>(event, ({ payload }) => handler(payload));
+}
+
+export interface DeckState {
+  activeProfileId: string;
+  activeProfileName: string | null;
+  boundProfileName: string | null;
+  gamingMode: boolean;
+  mode: string;
+}
+
+export function listenDeckState(handler: (state: DeckState) => void) {
+  return listen<DeckState>("deck:state", ({ payload }) => handler(payload));
 }
 
 export function listenMacroKey(

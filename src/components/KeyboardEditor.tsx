@@ -42,7 +42,7 @@ export function KeyboardEditor({
 
   return (
     <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]/60">
+      <div className="keyboard-toolbar">
         <div>
           <div className="text-xs font-semibold text-[var(--color-text-primary)]">
             {profile.name} · Keyboard Layout
@@ -52,7 +52,7 @@ export function KeyboardEditor({
             {actionCount === 1 ? "" : "s"} · click any key to edit or assign
           </div>
         </div>
-        <div className="flex items-center gap-1 p-1 rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)]">
+        <div className="layout-switcher">
           {LAYOUT_OPTIONS.map((option) => (
             <button
               key={option.value}
@@ -71,7 +71,7 @@ export function KeyboardEditor({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-6">
+      <div className="keyboard-canvas">
         <KeyboardView
           layout={layout}
           buttons={profile.buttons}

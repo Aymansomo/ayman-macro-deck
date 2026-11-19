@@ -125,18 +125,27 @@ impl AppCore {
         }
     }
 
-    pub fn apply_profile_switch(&self, profile_name: &str) {
-        let gaming = profile_name.eq_ignore_ascii_case("Gaming");
-        self.set_gaming(gaming);
+    /// Activates a profile by id or name. Buttons created in the editor store
+    /// the profile id (stable across renames); older configs store the name, so
+    /// both are accepted.
+    pub fn apply_profile_switch(&self, profile: &str) {
+        let resolved = {
+            let config = self.config.read().expect("config lock poisoned");
+            config
+                .profile(profile)
+                .or_else(|| config.profile_by_name(profile))
+                .map(|p| (p.id.clone(), p.name.clone()))
+        };
+
+        let Some((id, name)) = resolved else {
+            crate::logging::warn(format!("profile switch target not found: {}", profile));
+            return;
+        };
+
+        self.set_gaming(name.eq_ignore_ascii_case("Gaming"));
 
         let mut config = self.config.write().expect("config lock poisoned");
-        if let Some(profile) = config
-            .profiles
-            .iter()
-            .find(|p| p.name.eq_ignore_ascii_case(profile_name))
-        {
-            config.active_profile_id = profile.id.clone();
-        }
+        config.active_profile_id = id;
     }
 
     pub fn find_button(&self, button_id: &str) -> Option<MacroButton> {

@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
 import { ACTION_REGISTRY, createAction, getActionDef } from "../lib/actionRegistry";
 import { keyLabel } from "../lib/keyboardLayouts";
+import { getApplicationInfo } from "../lib/backend";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 import type {
   MacroButton,
@@ -58,6 +59,7 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [triggerError, setTriggerError] = useState("");
+  const [appPickerError, setAppPickerError] = useState("");
 
   useEffect(() => {
     draftRef.current = draft;
@@ -74,6 +76,7 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
     setShowKeyInput(false);
     setConfirmRemove(false);
     setTriggerError(validateTrigger(button.trigger ?? ""));
+    setAppPickerError("");
   }, [button.id]);
 
   const activeProfile = config.profiles.find(
@@ -102,6 +105,9 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
     const action = createAction(type);
     setDraft((prev) => ({ ...prev, actions: [...prev.actions, action] }));
     setSaved(false);
+    if (type === "open_application") {
+      void chooseApplication(action.id);
+    }
   };
 
   const removeAction = (actionId: string) => {
@@ -186,6 +192,40 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
     }
   };
 
+  const chooseApplication = async (actionId: string) => {
+    setAppPickerError("");
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          {
+            name: "Applications and shortcuts",
+            extensions: ["exe", "lnk", "bat", "cmd", "msi"],
+          },
+          { name: "All files", extensions: ["*"] },
+        ],
+      });
+      if (typeof selected !== "string") return;
+
+      const info = await getApplicationInfo(selected);
+      patchAction(actionId, {
+        name: `Open ${info.name}`,
+        params: { path: info.path },
+      });
+
+      const buttonPatch: Partial<MacroButton> = { name: info.name };
+      if (info.iconPath) buttonPatch.imagePath = info.iconPath;
+      if (!draft.description.trim()) {
+        buttonPatch.description = `Opens ${info.name}`;
+      }
+      patch(buttonPatch);
+    } catch (error) {
+      setAppPickerError(
+        typeof error === "string" ? error : "Could not choose that application.",
+      );
+    }
+  };
+
   const runImageSearch = async (mode = sourceMode) => {
     const q = query.trim();
     if (!q) return;
@@ -229,7 +269,7 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
   };
 
   return (
-    <div className="w-[360px] h-full bg-[var(--color-bg-secondary)] border-l border-[var(--color-border)] flex flex-col overflow-hidden animate-slideRight">
+    <div className="button-editor">
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
         <div>
@@ -591,6 +631,7 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
                               params: { ...action.params, [field.key]: v },
                             })
                           }
+                          onPickApplication={() => void chooseApplication(action.id)}
                         />
                       ))}
                     </div>
@@ -643,6 +684,12 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
               ))}
             </select>
           </div>
+
+          {appPickerError && (
+            <p className="text-[10px] text-[var(--color-danger)] mt-2">
+              {appPickerError}
+            </p>
+          )}
         </div>
       </div>
 
@@ -701,14 +748,27 @@ function ParamInput({
   def,
   value,
   onChange,
+  onPickApplication,
 }: {
   field: ParamField;
   def: ActionDefinition;
   value: string | boolean;
   onChange: (v: string | boolean) => void;
+  onPickApplication?: () => void;
 }) {
   const [options, setOptions] = useState<string[]>(field.options ?? []);
   const [loading, setLoading] = useState(false);
+  const profiles = useAppStore((s) => s.config.profiles);
+
+  // Older buttons store the profile name. Migrate them to the stable id so a
+  // later rename cannot break the button.
+  useEffect(() => {
+    if (def.type !== "switch_profile" || field.key !== "profile") return;
+    const current = String(value);
+    if (!current) return;
+    const legacy = profiles.find((p) => p.name === current && p.id !== current);
+    if (legacy) onChange(legacy.id);
+  }, [def.type, field.key, value, profiles, onChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -727,6 +787,66 @@ function ParamInput({
       cancelled = true;
     };
   }, [def, field.key]);
+
+  if (def.type === "switch_profile" && field.key === "profile") {
+    return (
+      <div>
+        <label className="text-[10px] text-[var(--color-text-muted)] mb-1 block">
+          {field.label}
+        </label>
+        <select
+          value={String(value)}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-full px-2 py-1.5 rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors cursor-pointer"
+        >
+          <option value="" disabled>
+            Choose a profile
+          </option>
+          {String(value) &&
+            !profiles.some((p) => p.id === String(value)) && (
+              <option value={String(value)}>{String(value)} (missing)</option>
+            )}
+          {profiles.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+          Pressing this button&apos;s key on the macro keypad activates the selected profile.
+        </p>
+      </div>
+    );
+  }
+
+  if (def.type === "open_application" && field.key === "path") {
+    return (
+      <div>
+        <label className="text-[10px] text-[var(--color-text-muted)] mb-1 block">
+          {field.label}
+        </label>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={String(value)}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={field.placeholder}
+            className="flex-1 min-w-0 px-2 py-1.5 rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] font-mono outline-none focus:border-[var(--color-accent)] transition-colors"
+          />
+          <button
+            type="button"
+            onClick={onPickApplication}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            Choose app…
+          </button>
+        </div>
+        <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+          Picking an app fills its icon, name and description automatically.
+        </p>
+      </div>
+    );
+  }
 
   const isSelect = field.type === "select" || options.length > 0;
 

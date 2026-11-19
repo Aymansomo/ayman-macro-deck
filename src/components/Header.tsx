@@ -28,13 +28,15 @@ export function Header({ engineStatus, onOpenDeviceManager }: Props) {
 
   return (
     <>
-      <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--color-border)]">
-        <div className="flex items-center gap-3">
-          <div className="text-lg font-bold tracking-wider text-[var(--color-text-primary)]">
-            AYMAN MACRO DECK
+      <header className="app-header">
+        <div className="brand">
+          <span className="brand-mark">AM</span>
+          <div>
+            <div className="brand-title">AYMAN MACRO DECK</div>
+            <div className="brand-subtitle">Control surface</div>
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="header-actions">
           <UpdateButton />
           <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
             <span className="w-2 h-2 rounded-full bg-[var(--color-success)] inline-block" />
@@ -72,7 +74,7 @@ export function Header({ engineStatus, onOpenDeviceManager }: Props) {
             ⚙
           </button>
         </div>
-      </div>
+      </header>
       <ProfileManager open={managerOpen} onClose={() => setManagerOpen(false)} />
       <SteamAccountsPanel open={steamOpen} onClose={() => setSteamOpen(false)} />
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />

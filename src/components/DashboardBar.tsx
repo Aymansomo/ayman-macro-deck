@@ -62,22 +62,22 @@ export function DashboardBar({
   };
 
   return (
-    <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]/40 px-5 py-2.5">
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="min-w-[150px] rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2">
-          <div className="text-[8px] tracking-widest text-[var(--color-text-muted)]">
+    <div className="dashboard">
+      <div className="dashboard-grid">
+        <div className="dashboard-card">
+          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
             ACTIVE PROFILE
           </div>
           <div className="text-xs font-semibold text-[var(--color-text-primary)] mt-0.5">
             {activeProfile?.name ?? "None"}
           </div>
-          <div className="text-[9px] text-[var(--color-text-muted)]">
+          <div className="text-[10px] text-[var(--color-text-muted)]">
             {isGamingMode ? "Gaming mode" : "Normal mode"}
           </div>
         </div>
 
-        <div className="min-w-[180px] rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2">
-          <div className="text-[8px] tracking-widest text-[var(--color-text-muted)]">
+        <div className="dashboard-card">
+          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
             MACRO KEYPAD
           </div>
           <div className="text-xs font-semibold text-[var(--color-text-primary)] mt-0.5 truncate max-w-[220px]">
@@ -85,14 +85,14 @@ export function DashboardBar({
           </div>
           <button
             onClick={onOpenDeviceManager}
-            className="text-[9px] text-[var(--color-accent)] hover:underline cursor-pointer"
+            className="text-[10px] text-[var(--color-accent)] hover:underline cursor-pointer"
           >
             Open Device Manager
           </button>
         </div>
 
-        <div className="min-w-[150px] rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2">
-          <div className="text-[8px] tracking-widest text-[var(--color-text-muted)]">
+        <div className="dashboard-card">
+          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
             ENGINE
           </div>
           <div className="flex items-center gap-1.5 mt-0.5">
@@ -112,26 +112,26 @@ export function DashboardBar({
           <button
             onClick={() => void toggleEngine()}
             disabled={busy}
-            className="text-[9px] text-[var(--color-accent)] hover:underline cursor-pointer disabled:opacity-40"
+            className="text-[10px] text-[var(--color-accent)] hover:underline cursor-pointer disabled:opacity-40"
           >
             {busy ? "Working…" : paused ? "Resume" : running ? "Pause" : "Start"}
           </button>
         </div>
 
-        <div className="min-w-[130px] rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2">
-          <div className="text-[8px] tracking-widest text-[var(--color-text-muted)]">
+        <div className="dashboard-card">
+          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
             THIS LAYOUT
           </div>
           <div className="text-xs font-semibold text-[var(--color-text-primary)] mt-0.5">
             {configuredCount} keys · {actionCount} actions
           </div>
-          <div className="text-[9px] text-[var(--color-text-muted)]">
+          <div className="text-[10px] text-[var(--color-text-muted)]">
             {engineStatus?.keyboard.triggers ?? 0} triggers this session
           </div>
         </div>
 
-        <div className="min-w-[190px] flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2">
-          <div className="text-[8px] tracking-widest text-[var(--color-text-muted)]">
+        <div className="dashboard-card dashboard-action">
+          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
             LAST ACTION
           </div>
           {lastAction ? (
@@ -143,7 +143,7 @@ export function DashboardBar({
                 {lastAction.buttonName}
               </div>
               <div
-                className="text-[9px] text-[var(--color-text-muted)] truncate"
+                className="text-[10px] text-[var(--color-text-muted)] truncate"
                 title={lastAction.message}
               >
                 {lastAction.keyId ? `${lastAction.keyId} · ` : ""}{lastAction.message}

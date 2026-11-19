@@ -216,7 +216,7 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="w-[500px] h-full bg-[var(--color-bg-secondary)] border-l border-[var(--color-border)] shadow-2xl flex flex-col animate-slideRight">
+      <div className="device-panel side-panel">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
           <div>
             <h2 className="text-base font-semibold text-[var(--color-text-primary)]">

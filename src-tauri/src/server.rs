@@ -401,10 +401,29 @@ fn current_gaming(app: &tauri::AppHandle) -> bool {
     core_of(app).map(|core| core.gaming()).unwrap_or(false)
 }
 
-/// Mirrors the engine's profile choice: ScrollLock picks Gaming/Normal, with the
-/// app's active profile as a fallback.
+/// Mirrors the engine's profile choice: an explicitly selected custom profile
+/// wins, otherwise ScrollLock picks Gaming/Normal with the app's active profile
+/// as a fallback.
 fn active_profile(config: &serde_json::Value, mode_is_gaming: bool) -> Option<serde_json::Value> {
     let profiles = config.get("profiles")?.as_array()?;
+    let active_id = config
+        .get("activeProfileId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let by_id = |id: &str| {
+        profiles
+            .iter()
+            .find(|p| p.get("id").and_then(|i| i.as_str()) == Some(id))
+    };
+
+    if let Some(active) = by_id(active_id) {
+        let name = active.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if !name.eq_ignore_ascii_case("Gaming") && !name.eq_ignore_ascii_case("Normal") {
+            return Some(active.clone());
+        }
+    }
+
     let wanted = if mode_is_gaming { "gaming" } else { "normal" };
 
     if let Some(found) = profiles.iter().find(|p| {
@@ -416,14 +435,7 @@ fn active_profile(config: &serde_json::Value, mode_is_gaming: bool) -> Option<se
         return Some(found.clone());
     }
 
-    let active_id = config
-        .get("activeProfileId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    profiles
-        .iter()
-        .find(|p| p.get("id").and_then(|i| i.as_str()) == Some(active_id))
+    by_id(active_id)
         .or_else(|| profiles.first())
         .cloned()
 }

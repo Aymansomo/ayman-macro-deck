@@ -142,13 +142,20 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 fn build_bindings(core: &AppCore) -> (HashMap<Shortcut, Binding>, Vec<String>) {
-    let config = core.config();
+    build_bindings_for(&core.config(), core.gaming())
+}
+
+fn build_bindings_for(
+    config: &crate::models::AppConfig,
+    gaming: bool,
+) -> (HashMap<Shortcut, Binding>, Vec<String>) {
     let mut bindings: HashMap<Shortcut, Binding> = HashMap::new();
     let mut problems: Vec<String> = Vec::new();
 
-    let Some(profile) = config.active_profile(core.gaming()) else {
+    let Some(profile) = config.active_profile(gaming) else {
         return (bindings, problems);
     };
+    let active_profile_id = profile.id.clone();
 
     for button in &profile.buttons {
         if !button.enabled {
@@ -174,6 +181,34 @@ fn build_bindings(core: &AppCore) -> (HashMap<Shortcut, Binding>, Vec<String>) {
             }
             Ok(None) => {}
             Err(error) => problems.push(format!("button \"{}\": {}", button.name, error)),
+        }
+    }
+
+    // Profile-switch and mode-toggle buttons stay reachable from every profile
+    // so a keypad key can always jump to another profile. `find_button` already
+    // looks across all profiles, so these bindings dispatch the original button.
+    // The active profile owns its keys; only unused triggers are borrowed.
+    for other in &config.profiles {
+        if other.id == active_profile_id {
+            continue;
+        }
+        for button in &other.buttons {
+            if !button.enabled || !crate::actions::is_mode_action(button) {
+                continue;
+            }
+            let Ok(Some(shortcut)) = button.effective_trigger() else {
+                continue;
+            };
+            if bindings.contains_key(&shortcut) {
+                continue;
+            }
+            bindings.insert(
+                shortcut,
+                Binding {
+                    button_id: button.id.clone(),
+                    button_name: button.name.clone(),
+                },
+            );
         }
     }
 
@@ -647,5 +682,48 @@ mod tests {
 
         assert_eq!(config.active_profile(false).unwrap().id, "n");
         assert_eq!(config.active_profile(true).unwrap().id, "g");
+    }
+
+    #[test]
+    fn profile_switch_buttons_stay_bound_from_other_profiles() {
+        let config = AppConfig {
+            active_profile_id: "work".into(),
+            profiles: vec![
+                Profile {
+                    id: "n".into(),
+                    name: "Normal".into(),
+                    buttons: vec![MacroButton {
+                        id: "to_normal".into(),
+                        trigger: Some("Numpad1".into()),
+                        name: "Switch to Normal".into(),
+                        actions: vec![ButtonAction {
+                            action_type: "switch_profile".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                Profile {
+                    id: "work".into(),
+                    name: "Work".into(),
+                    buttons: vec![MacroButton {
+                        id: "work_button".into(),
+                        trigger: Some("Numpad2".into()),
+                        name: "Work button".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (bindings, _) = build_bindings_for(&config, false);
+        assert_eq!(bindings.len(), 2);
+        assert!(
+            bindings.values().any(|b| b.button_id == "to_normal"),
+            "the switch button from Normal must remain reachable while Work is active"
+        );
     }
 }

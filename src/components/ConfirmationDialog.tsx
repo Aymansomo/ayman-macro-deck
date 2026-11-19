@@ -32,7 +32,7 @@ export function ConfirmationDialog({
         if (e.target === e.currentTarget) onCancel();
       }}
     >
-      <div className="bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-xl shadow-2xl w-[380px] p-6 animate-slideUp">
+      <div className="confirm-dialog bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-xl shadow-2xl animate-slideUp">
         <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-2">
           {title}
         </h3>
