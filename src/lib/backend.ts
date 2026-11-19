@@ -116,6 +116,18 @@ export function setMacroDeviceCollections(include: boolean) {
   return invoke<DeviceStatus>("set_macro_device_collections", { include });
 }
 
+export function setMacroDeviceSuppression(suppress: boolean) {
+  return invoke<DeviceStatus>("set_macro_device_suppression", { suppress });
+}
+
+export function getStartWithWindows() {
+  return invoke<boolean>("get_start_with_windows");
+}
+
+export function setStartWithWindows(enabled: boolean) {
+  return invoke<boolean>("set_start_with_windows", { enabled });
+}
+
 export function loadConfigRaw() {
   return invoke<string>("load_config");
 }

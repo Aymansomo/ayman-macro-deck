@@ -5,7 +5,7 @@ import { DashboardBar } from "./components/DashboardBar";
 import { KeyboardEditor } from "./components/KeyboardEditor";
 import { ButtonEditor } from "./components/ButtonEditor";
 import { StatusBar } from "./components/StatusBar";
-import { DeviceManagerPanel } from "./components/DeviceManagerPanel";
+import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import {
   getMacroEngineStatus,
   listenDeckState,
@@ -36,7 +36,8 @@ function App() {
   const setKeyboardConnected = useAppStore((s) => s.setKeyboardConnected);
   const config = useAppStore((s) => s.config);
   const [selectedButtonId, setSelectedButtonId] = useState<string | null>(null);
-  const [deviceManagerOpen, setDeviceManagerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("engine");
   const [engineStatus, setEngineStatus] = useState<MacroEngineStatus | null>(null);
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
   const [runningButtonId, setRunningButtonId] = useState<string | null>(null);
@@ -207,6 +208,11 @@ function App() {
     setSelectedButtonId(null);
   }, []);
 
+  const openSettings = useCallback((tab: SettingsTab) => {
+    setSettingsTab(tab);
+    setSettingsOpen(true);
+  }, []);
+
   const activeProfile = config.profiles.find(
     (p) => p.id === config.activeProfileId,
   );
@@ -217,14 +223,14 @@ function App() {
     <div className="app-shell">
       <Header
         engineStatus={engineStatus}
-        onOpenDeviceManager={() => setDeviceManagerOpen(true)}
+        onOpenSettings={() => openSettings("engine")}
       />
       <div className="app-main">
         <div className="app-workspace">
           <DashboardBar
             engineStatus={engineStatus}
             recentActions={recentActions}
-            onOpenDeviceManager={() => setDeviceManagerOpen(true)}
+            onOpenDeviceManager={() => openSettings("keypad")}
             onEngineStatusChange={setEngineStatus}
           />
           {activeProfile ? (
@@ -253,9 +259,11 @@ function App() {
         )}
       </div>
       <StatusBar engineStatus={engineStatus} />
-      <DeviceManagerPanel
-        open={deviceManagerOpen}
-        onClose={() => setDeviceManagerOpen(false)}
+      <SettingsDialog
+        open={settingsOpen}
+        tab={settingsTab}
+        onTabChange={setSettingsTab}
+        onClose={() => setSettingsOpen(false)}
         selectedButtonId={selectedButtonId}
         onAssignKey={(keyId) => {
           if (!selectedButtonId) return false;

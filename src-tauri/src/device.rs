@@ -4,12 +4,10 @@
 //! generated an event. Unlike `WH_KEYBOARD_LL`, it can therefore enforce the
 //! "main keyboard never fires macros" rule.
 //!
-//! Design decision: we deliberately do **not** use `RIDEV_NOLEGACY`.
-//! `RAWINPUTDEVICE` has no per-device handle field — registration is per HID
-//! top-level collection, and every keyboard shares usage page 1 / usage 6.
-//! Setting `RIDEV_NOLEGACY` would therefore suppress legacy input for the main
-//! keyboard too. Raw Input is used for identification and triggering only;
-//! legacy typing is left untouched.
+//! Raw Input never suppresses a key (blocking keys belongs to the low-level
+//! hook in `keyboard.rs`, where it is system-wide and device-blind). This module
+//! only identifies the source device, so the main keyboard can never fire a
+//! macro and a bound deck key can be hidden without touching typing.
 
 use std::collections::HashSet;
 use std::ffi::c_void;
@@ -35,7 +33,7 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostQuitMessage,
     PostThreadMessageW, RegisterClassW, TranslateMessage, UnregisterClassW, WNDCLASSW,
-    RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, GIDC_ARRIVAL, GIDC_REMOVAL, HWND_MESSAGE, RIM_INPUT,
+    RI_KEY_BREAK, RI_KEY_E0, GIDC_ARRIVAL, GIDC_REMOVAL, HWND_MESSAGE, RIM_INPUT,
     RIM_INPUTSINK, WM_DESTROY, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT,
 };
 
@@ -69,8 +67,8 @@ pub struct DeviceStatus {
     pub selected_id: Option<String>,
     pub selected_connected: bool,
     pub testing: bool,
-    /// Always false. Documented here because per-device suppression is not a
-    /// Windows Raw Input capability (see module docs).
+    /// When true the low-level hook hides bound deck keys from every
+    /// application, so they run their macro and never type.
     pub suppress_legacy: bool,
     /// When true, every connected HID collection sharing the selected keypad's
     /// hardware ID is accepted as the same physical device.
@@ -101,6 +99,12 @@ struct DeviceSettings {
     selected_name: Option<String>,
     #[serde(default)]
     include_collections: bool,
+    #[serde(default = "default_suppress_legacy")]
+    suppress_legacy: bool,
+}
+
+fn default_suppress_legacy() -> bool {
+    true
 }
 
 static MANAGER: OnceLock<Arc<RawInputManager>> = OnceLock::new();
@@ -112,6 +116,7 @@ pub struct RawInputManager {
     selected: RwLock<Option<KeyboardDevice>>,
     /// Key-down state per (device, key). Auto-repeat is ignored until key-up.
     pressed: Mutex<HashSet<(String, String)>>,
+    suppress_legacy: AtomicBool,
     test_candidate: RwLock<Option<KeyboardDevice>>,
     include_collections: AtomicBool,
     settings_path: Mutex<PathBuf>,
@@ -144,6 +149,7 @@ impl RawInputManager {
             devices: RwLock::new(Vec::new()),
             selected: RwLock::new(None),
             pressed: Mutex::new(HashSet::new()),
+            suppress_legacy: AtomicBool::new(default_suppress_legacy()),
             test_candidate: RwLock::new(None),
             include_collections: AtomicBool::new(false),
             settings_path: Mutex::new(settings_path),
@@ -169,6 +175,9 @@ impl RawInputManager {
         let Ok(saved) = serde_json::from_str::<DeviceSettings>(&text) else { return };
         self.include_collections
             .store(saved.include_collections, Ordering::SeqCst);
+        self.suppress_legacy
+            .store(saved.suppress_legacy, Ordering::SeqCst);
+        crate::keyboard::set_suppress_bound_keys(saved.suppress_legacy);
 
         let devices = self.devices.read().unwrap();
         let identity = saved.selected_id.as_deref().unwrap_or("");
@@ -218,6 +227,7 @@ impl RawInputManager {
             selected_hardware_id: selected.as_ref().map(|d| d.hardware_id.clone()),
             selected_name: selected.as_ref().map(|d| d.name.clone()),
             include_collections: self.include_collections.load(Ordering::SeqCst),
+            suppress_legacy: self.suppress_legacy.load(Ordering::SeqCst),
         };
         if let Ok(json) = serde_json::to_string_pretty(&settings) {
             let path = self.settings_path.lock().unwrap().clone();
@@ -398,9 +408,24 @@ impl RawInputManager {
             selected_id,
             selected_connected,
             testing: self.is_testing(),
-            suppress_legacy: false,
+            suppress_legacy: self.suppress_legacy(),
             include_collections: self.include_collections(),
         }
+    }
+
+    pub fn suppress_legacy(&self) -> bool {
+        self.suppress_legacy.load(Ordering::SeqCst)
+    }
+
+    /// Turns deck-key capture on or off. On = bound deck keys run their macro
+    /// and never type; off = deck keys type normally again.
+    pub fn set_suppress_legacy(&self, suppress: bool) -> Result<DeviceStatus, String> {
+        self.suppress_legacy.store(suppress, Ordering::SeqCst);
+        self.pressed.lock().unwrap().clear();
+        crate::keyboard::set_suppress_bound_keys(suppress);
+        self.save_settings();
+        self.emit_status();
+        Ok(self.status())
     }
 
     pub fn emit_status(&self) {
@@ -457,6 +482,7 @@ impl RawInputManager {
         if let Some(handle) = self.thread.lock().unwrap().take() {
             let _ = handle.join();
         }
+        *self.hwnd.lock().unwrap() = None;
         self.pressed.lock().unwrap().clear();
         crate::logging::info("Raw Input keyboard listener stopped");
         self.emit_status();
@@ -475,7 +501,7 @@ impl RawInputManager {
         // a selected keypad slot, even if it has the same scan code.
         let Some(path) = (unsafe { device_path(device_handle) }) else { return };
         let actual_id = normalize_id(&path);
-        let extended = keyboard.Flags & ((RI_KEY_E0 | RI_KEY_E1) as u16) != 0;
+        let extended = keyboard.Flags & RI_KEY_E0 as u16 != 0;
         let down = keyboard.Flags & RI_KEY_BREAK as u16 == 0;
         let key = KeyId::from_raw(keyboard.MakeCode, extended, keyboard.VKey);
         let key_id = key.id();
@@ -556,6 +582,7 @@ impl RawInputManager {
             down,
         });
     }
+
 }
 
 /// Pure isolation check used by the Raw Input handler and unit tests.
@@ -759,7 +786,8 @@ fn raw_input_thread(ready: Sender<Result<u32, String>>) {
             usUsage: HID_USAGE_GENERIC_KEYBOARD,
             // INPUTSINK receives keys even while the app is in the tray.
             // DEVNOTIFY reports arrival/removal. NOLEGACY is intentionally
-            // absent: it would suppress the main keyboard too.
+            // absent: it only silences this process (it is not system-wide) and
+            // blocking keys is the low-level hook's job.
             dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
             hwndTarget: hwnd,
         };

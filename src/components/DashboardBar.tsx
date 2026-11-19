@@ -47,6 +47,11 @@ export function DashboardBar({
   const paused = engineStatus?.keyboard.paused ?? false;
   const running = engineStatus?.keyboard.running ?? false;
   const lastAction = recentActions[0];
+  const engineTone = !running
+    ? "var(--color-danger)"
+    : paused
+      ? "var(--color-warning)"
+      : "var(--color-success)";
 
   const toggleEngine = async () => {
     setBusy(true);
@@ -65,94 +70,89 @@ export function DashboardBar({
     <div className="dashboard">
       <div className="dashboard-grid">
         <div className="dashboard-card">
-          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
-            ACTIVE PROFILE
-          </div>
-          <div className="text-xs font-semibold text-[var(--color-text-primary)] mt-0.5">
+          <div className="dashboard-card-label">Active profile</div>
+          <div className="dashboard-card-value truncate" title={activeProfile?.name}>
             {activeProfile?.name ?? "None"}
           </div>
-          <div className="text-[10px] text-[var(--color-text-muted)]">
+          <div className="dashboard-card-meta">
+            <span
+              className="status-dot"
+              style={{
+                background: isGamingMode
+                  ? "var(--color-warning)"
+                  : "var(--color-text-muted)",
+              }}
+            />
             {isGamingMode ? "Gaming mode" : "Normal mode"}
           </div>
         </div>
 
         <div className="dashboard-card">
-          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
-            MACRO KEYPAD
-          </div>
-          <div className="text-xs font-semibold text-[var(--color-text-primary)] mt-0.5 truncate max-w-[220px]">
+          <div className="dashboard-card-label">Macro keypad</div>
+          <div className="dashboard-card-value truncate" title={shortDeviceName(engineStatus)}>
             {shortDeviceName(engineStatus)}
           </div>
           <button
+            type="button"
             onClick={onOpenDeviceManager}
-            className="text-[10px] text-[var(--color-accent)] hover:underline cursor-pointer"
+            className="dashboard-card-action"
           >
-            Open Device Manager
+            Change keypad
           </button>
         </div>
 
         <div className="dashboard-card">
-          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
-            ENGINE
-          </div>
-          <div className="flex items-center gap-1.5 mt-0.5">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                paused
-                  ? "bg-[var(--color-warning)]"
-                  : running
-                    ? "bg-[var(--color-success)]"
-                    : "bg-[var(--color-danger)]"
-              }`}
-            />
-            <span className="text-xs font-semibold text-[var(--color-text-primary)]">
-              {paused ? "Paused" : running ? "Running" : "Stopped"}
-            </span>
+          <div className="dashboard-card-label">Engine</div>
+          <div className="dashboard-card-value">
+            <span className="status-dot" style={{ background: engineTone }} />
+            {paused ? "Paused" : running ? "Running" : "Stopped"}
           </div>
           <button
+            type="button"
             onClick={() => void toggleEngine()}
             disabled={busy}
-            className="text-[10px] text-[var(--color-accent)] hover:underline cursor-pointer disabled:opacity-40"
+            className="dashboard-card-action"
           >
-            {busy ? "Working…" : paused ? "Resume" : running ? "Pause" : "Start"}
+            {busy ? "Working…" : paused ? "Resume shortcuts" : running ? "Pause shortcuts" : "Start engine"}
           </button>
         </div>
 
         <div className="dashboard-card">
-          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
-            THIS LAYOUT
-          </div>
-          <div className="text-xs font-semibold text-[var(--color-text-primary)] mt-0.5">
+          <div className="dashboard-card-label">This layout</div>
+          <div className="dashboard-card-value">
             {configuredCount} keys · {actionCount} actions
           </div>
-          <div className="text-[10px] text-[var(--color-text-muted)]">
+          <div className="dashboard-card-meta">
             {engineStatus?.keyboard.triggers ?? 0} triggers this session
           </div>
         </div>
 
-        <div className="dashboard-card dashboard-action">
-          <div className="text-[9px] tracking-widest text-[var(--color-text-muted)]">
-            LAST ACTION
-          </div>
+        <div className="dashboard-card dashboard-card-last">
+          <div className="dashboard-card-label">Last action</div>
           {lastAction ? (
-            <div className="mt-0.5">
-              <div className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
-                <span className={lastAction.ok ? "text-[var(--color-success)]" : "text-[var(--color-danger)]"}>
+            <>
+              <div className="dashboard-card-value truncate">
+                <span
+                  className={
+                    lastAction.ok
+                      ? "text-[var(--color-success)]"
+                      : "text-[var(--color-danger)]"
+                  }
+                >
                   {lastAction.ok ? "✓" : "✕"}
                 </span>{" "}
                 {lastAction.buttonName}
               </div>
               <div
-                className="text-[10px] text-[var(--color-text-muted)] truncate"
+                className="dashboard-card-meta truncate"
                 title={lastAction.message}
               >
-                {lastAction.keyId ? `${lastAction.keyId} · ` : ""}{lastAction.message}
+                {lastAction.keyId ? `${lastAction.keyId} · ` : ""}
+                {lastAction.message}
               </div>
-            </div>
+            </>
           ) : (
-            <div className="text-[10px] text-[var(--color-text-muted)] mt-1">
-              Waiting for a keypad trigger…
-            </div>
+            <div className="dashboard-card-meta">Waiting for a keypad trigger…</div>
           )}
         </div>
       </div>

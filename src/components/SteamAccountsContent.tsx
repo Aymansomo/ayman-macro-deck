@@ -2,12 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 
-interface Props {
-  open: boolean;
-  onClose: () => void;
-}
-
-export function SteamAccountsPanel({ open, onClose }: Props) {
+export function SteamAccountsContent() {
   const steam = useAppStore((s) => s.config.settings.steam);
   const addSteamAccount = useAppStore((s) => s.addSteamAccount);
   const renameSteamAccount = useAppStore((s) => s.renameSteamAccount);
@@ -26,13 +21,10 @@ export function SteamAccountsPanel({ open, onClose }: Props) {
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!open) return;
     setFolderDraft(steam.profileShortcutsFolder);
     void scan(steam.profileShortcutsFolder, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, steam.profileShortcutsFolder]);
-
-  if (!open) return null;
+  }, [steam.profileShortcutsFolder]);
 
   const accounts = steam.profileShortcuts;
 
@@ -78,26 +70,7 @@ export function SteamAccountsPanel({ open, onClose }: Props) {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-[90] flex justify-end bg-black/40"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="steam-panel side-panel">
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
-          <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
-            🎮 Steam Accounts
-          </h2>
-          <button
-            onClick={onClose}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] transition-colors cursor-pointer"
-          >
-            ✕
-          </button>
-        </div>
-
+    <div className="space-y-5">
         {/* Explanation */}
         <div className="px-5 py-4 border-b border-[var(--color-border)]">
           <label className="text-xs text-[var(--color-text-muted)] mb-2 block">
@@ -279,7 +252,6 @@ export function SteamAccountsPanel({ open, onClose }: Props) {
             type in the "Switch Steam Account" action.
           </p>
         </div>
-      </div>
     </div>
   );
 }

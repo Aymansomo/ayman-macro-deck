@@ -8,6 +8,7 @@ import {
   refreshKeyboardDevices,
   selectMacroDevice,
   setMacroDeviceCollections,
+  setMacroDeviceSuppression,
   startDeviceTest,
   stopDeviceTest,
   type DeviceStatus,
@@ -16,8 +17,6 @@ import {
 } from "../lib/backend";
 
 interface Props {
-  open: boolean;
-  onClose: () => void;
   selectedButtonId?: string | null;
   onAssignKey?: (keyId: string) => boolean;
 }
@@ -32,7 +31,7 @@ function friendlyName(device: KeyboardDevice, index: number, total: number): str
   return total > 1 ? `${base} · collection ${index + 1}` : base;
 }
 
-export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKey }: Props) {
+export function DeviceManagerContent({ selectedButtonId, onAssignKey }: Props) {
   const [status, setStatus] = useState<DeviceStatus | null>(null);
   const [testing, setTesting] = useState(false);
   const [detected, setDetected] = useState<DeviceTestResult | null>(null);
@@ -64,7 +63,6 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
   }, [refresh]);
 
   useEffect(() => {
-    if (!open) return;
     void refresh();
 
     const subscriptions = [
@@ -86,7 +84,7 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
         unsubscribers.forEach((off) => off());
       });
     };
-  }, [open, refresh]);
+  }, [refresh]);
 
   const grouped = useMemo(() => {
     const groups = new Map<string, KeyboardDevice[]>();
@@ -98,8 +96,6 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
     }
     return [...groups.entries()];
   }, [status?.devices]);
-
-  if (!open) return null;
 
   const handleSelect = async (id: string) => {
     setBusy(id);
@@ -175,6 +171,23 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
     }
   };
 
+  const handleToggleSuppression = async (suppress: boolean) => {
+    setBusy("suppression");
+    try {
+      const next = await setMacroDeviceSuppression(suppress);
+      setStatus(next);
+      setMessage(
+        suppress
+          ? "Keypad captured — deck keys run their macro only, other keyboards still type"
+          : "Keypad capture off — deck keys type normally again",
+      );
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy("");
+    }
+  };
+
   const handleAssignKey = () => {
     if (!detected) return;
     const ok = onAssignKey?.(detected.keyId) ?? false;
@@ -210,31 +223,7 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
   const selectedName = status?.devices.find((device) => device.id === status.selectedId)?.name;
 
   return (
-    <div
-      className="fixed inset-0 z-[90] flex justify-end bg-black/40"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="device-panel side-panel">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
-          <div>
-            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
-              Device Manager
-            </h2>
-            <p className="text-[10px] text-[var(--color-text-muted)]">
-              Windows Raw Input · physical keypad identification
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] transition-colors cursor-pointer"
-          >
-            ✕
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+    <div className="space-y-5">
           <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4 space-y-3">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
@@ -265,11 +254,32 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
               </div>
               <div>
                 <div className="text-[var(--color-text-muted)] tracking-wider mb-1">
-                  LEGACY SUPPRESSION
+                  DECK KEYS
                 </div>
-                <div className="text-[var(--color-text-primary)]">Off (by design)</div>
+                <div className="text-[var(--color-text-primary)]">
+                  {status?.suppressLegacy ? "Macro only" : "Type + macro"}
+                </div>
               </div>
             </div>
+
+            <label className="flex items-start gap-2 text-[11px] text-[var(--color-text-secondary)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={status?.suppressLegacy ?? false}
+                onChange={(event) => void handleToggleSuppression(event.target.checked)}
+                disabled={busy === "suppression"}
+                className="mt-0.5 accent-[var(--color-accent)]"
+              />
+              <span>
+                Keypad keys never type — they only run their macro
+                <span className="block text-[10px] text-[var(--color-text-muted)]">
+                  Pressing Numpad 1 opens Instagram DMs and no longer types “1”.
+                  Windows cannot tell keyboards apart at this layer, so the same
+                  key on another numpad is captured too. Pause, or this switch,
+                  brings normal typing back.
+                </span>
+              </span>
+            </label>
 
             <label className="flex items-start gap-2 text-[11px] text-[var(--color-text-secondary)] cursor-pointer">
               <input
@@ -289,9 +299,9 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
             </label>
 
             <p className="text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
-              Only the selected device can trigger macros. The main keyboard keeps
-              typing normally — Windows Raw Input cannot suppress legacy input for
-              one keyboard without suppressing all keyboards.
+              Bound deck keys are hidden from Windows by the low-level keyboard
+              hook, which cannot tell keyboards apart: a key you bind stops typing
+              everywhere, and every unbound key types untouched.
             </p>
             {status?.error && (
               <p className="text-[10px] text-[var(--color-danger)]">{status.error}</p>
@@ -446,8 +456,6 @@ export function DeviceManagerPanel({ open, onClose, selectedButtonId, onAssignKe
           {message && (
             <p className="text-[11px] text-[var(--color-text-secondary)]">{message}</p>
           )}
-        </div>
-      </div>
     </div>
   );
 }

@@ -121,6 +121,42 @@ impl KeyId {
         }
     }
 
+    /// Inverse of `from_raw` for keys the deck can bind: the scan code and
+    /// extended flag, or `None` when the key has no unambiguous scan code.
+    pub fn scan(&self) -> Option<(u16, bool)> {
+        Some(match self {
+            Self::Numpad(0) => (0x52, false),
+            Self::Numpad(d @ 1..=9) => {
+                let scans = [0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D, 0x47, 0x48, 0x49];
+                (scans[(d - 1) as usize], false)
+            }
+            Self::Numpad(_) => return None,
+            Self::NumpadDiv => (0x35, true),
+            Self::NumpadMul => (0x37, false),
+            Self::NumpadSub => (0x4A, false),
+            Self::NumpadAdd => (0x4E, false),
+            Self::NumpadDot => (0x53, false),
+            Self::NumpadEnter => (0x1C, true),
+            Self::NavInsert => (0x52, true),
+            Self::NavHome => (0x47, true),
+            Self::NavPageUp => (0x49, true),
+            Self::NavDelete => (0x53, true),
+            Self::NavEnd => (0x4F, true),
+            Self::NavPageDown => (0x51, true),
+            Self::ArrowUp => (0x48, true),
+            Self::ArrowDown => (0x50, true),
+            Self::ArrowLeft => (0x4B, true),
+            Self::ArrowRight => (0x4D, true),
+            Self::Function(n @ 1..=10) => (0x3Au16 + *n as u16, false),
+            Self::Function(11) => (0x57, false),
+            Self::Function(12) => (0x58, false),
+            Self::Function(_) => return None,
+            // The main letter/digit block has no single scan code identity here.
+            Self::Letter(_) | Self::Digit(_) => return None,
+            Self::Other(scan, extended) => (*scan, *extended),
+        })
+    }
+
     /// Stable string used in config files and events.
     pub fn id(&self) -> String {
         match self {

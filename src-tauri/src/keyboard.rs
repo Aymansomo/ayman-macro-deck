@@ -11,10 +11,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager};
@@ -28,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::device::DeviceKeyEvent;
 use crate::keyid::KeyId;
+use crate::models::{AppConfig, MacroButton};
 use crate::shortcut::Shortcut;
 use crate::state::AppCore;
 
@@ -69,20 +70,53 @@ pub struct KeyInput {
     pub injected: bool,
 }
 
-/// Diagnostic state for the LL hook. It deliberately has no dispatch channel,
-/// no key-down set and no bindings lookup used for execution.
+/// Device name used for macros dispatched from the low-level hook. The hook
+/// cannot report a device, so these events carry their own source tag.
+const HOOK_SOURCE: &str = "hook";
+
+/// Bound deck keys are swallowed system-wide by the low-level hook so they never
+/// type. Windows cannot tell keyboards apart at this layer, so this applies to
+/// every device that sends the same scan code (a second numpad included).
+static SUPPRESS_BOUND_KEYS: AtomicBool = AtomicBool::new(true);
+
+pub fn suppress_bound_keys() -> bool {
+    SUPPRESS_BOUND_KEYS.load(Ordering::SeqCst)
+}
+
+pub fn set_suppress_bound_keys(suppress: bool) {
+    SUPPRESS_BOUND_KEYS.store(suppress, Ordering::SeqCst);
+    if let Some(context) = CONTEXT.get() {
+        context.swallowed_down.lock().unwrap().clear();
+    }
+    crate::logging::info(if suppress {
+        "bound deck keys are captured: they run their macro and never type"
+    } else {
+        "bound deck keys type normally again"
+    });
+}
+
+/// State for the LL hook: it hides bound deck keys from every application and
+/// hands them to the one action worker.
 struct HookContext {
     /// Bindings are kept only so the UI can display configured shortcuts.
     bindings: Mutex<HashMap<Shortcut, Binding>>,
+    /// `(scan, extended)` of keys that must not reach the focused window.
+    swallow: Mutex<HashSet<(u16, bool)>>,
+    /// Bound keys currently held down, so key-up and auto-repeat stay hidden.
+    swallowed_down: Mutex<HashSet<(u16, bool)>>,
+    dispatch: Sender<DeviceKeyEvent>,
     events: AtomicU64,
     physical_events: AtomicU64,
     paused: AtomicBool,
 }
 
 impl HookContext {
-    fn new() -> Self {
+    fn new(dispatch: Sender<DeviceKeyEvent>) -> Self {
         Self {
             bindings: Mutex::new(HashMap::new()),
+            swallow: Mutex::new(HashSet::new()),
+            swallowed_down: Mutex::new(HashSet::new()),
+            dispatch,
             events: AtomicU64::new(0),
             physical_events: AtomicU64::new(0),
             paused: AtomicBool::new(false),
@@ -130,19 +164,121 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 
     let flags = info.flags.0;
+    let scan = info.scanCode as u16;
+    let extended = flags & 0x01 != 0;
+    let injected = flags & LLKHF_INJECTED != 0;
     context.observe(KeyInput {
-        scan: info.scanCode as u16,
-        extended: flags & 0x01 != 0,
+        scan,
+        extended,
         up,
-        injected: flags & LLKHF_INJECTED != 0,
+        injected,
     });
 
-    // Never consume the key. Never dispatch a macro.
+    // Keys produced by our own actions are never swallowed.
+    if injected {
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
+
+    let capture = suppress_bound_keys() && !context.paused.load(Ordering::SeqCst);
+
+    if down && capture && context.swallow.lock().unwrap().contains(&(scan, extended)) {
+        // Hide the key from every application and run its macro from the
+        // action worker. Auto-repeat only counts as one press.
+        let first_press = context
+            .swallowed_down
+            .lock()
+            .unwrap()
+            .insert((scan, extended));
+        if first_press {
+            let _ = context.dispatch.send(DeviceKeyEvent {
+                device_id: HOOK_SOURCE.to_string(),
+                key_id: KeyId::from_raw(scan, extended, info.vkCode as u16).id(),
+                down: true,
+            });
+        }
+        return LRESULT(1);
+    }
+
+    if up && context.swallowed_down.lock().unwrap().remove(&(scan, extended)) {
+        let _ = context.dispatch.send(DeviceKeyEvent {
+            device_id: HOOK_SOURCE.to_string(),
+            key_id: KeyId::from_raw(scan, extended, info.vkCode as u16).id(),
+            down: false,
+        });
+        return LRESULT(1);
+    }
+
     CallNextHookEx(None, code, wparam, lparam)
+}
+
+/// Physical keys the hook must hide: enabled buttons with real actions whose
+/// trigger (or pinned physical key) is a bare, unmodified key.
+fn capture_keys(core: &AppCore) -> HashSet<(u16, bool)> {
+    let config = core.config();
+    let Some(profile) = config.active_profile(core.gaming()) else {
+        return HashSet::new();
+    };
+
+    let mut keys = HashSet::new();
+    for button in &profile.buttons {
+        if !button.enabled || button.actions.is_empty() {
+            continue;
+        }
+        if let Some(scan) = button
+            .physical_key_id
+            .as_deref()
+            .and_then(KeyId::parse)
+            .and_then(|key| key.scan())
+        {
+            keys.insert(scan);
+        }
+        let Ok(Some(shortcut)) = button.effective_trigger() else {
+            continue;
+        };
+        if shortcut.ctrl || shortcut.alt || shortcut.shift || shortcut.win {
+            // A modified shortcut must never hide the bare key.
+            continue;
+        }
+        if let Some(scan) = shortcut.key.scan() {
+            keys.insert(scan);
+        }
+    }
+    keys
 }
 
 fn build_bindings(core: &AppCore) -> (HashMap<Shortcut, Binding>, Vec<String>) {
     build_bindings_for(&core.config(), core.gaming())
+}
+
+/// The single definition of "this physical key runs a button": physical identity
+/// wins over labels and NumLock, then the configured trigger, then the legacy
+/// numeric key. Also used by the Raw Input layer to decide whether a keypad key
+/// must stay swallowed in capture mode.
+pub fn find_button_for_key(config: &AppConfig, gaming: bool, key: &KeyId) -> Option<MacroButton> {
+    let profile = config.active_profile(gaming)?;
+    let legacy = key.legacy_key();
+
+    profile
+        .buttons
+        .iter()
+        .find(|button| {
+            if !button.enabled {
+                return false;
+            }
+            if let Some(id) = button.physical_key_id.as_deref().and_then(KeyId::parse) {
+                if id == *key {
+                    return true;
+                }
+            }
+            let trigger_match = button
+                .effective_trigger()
+                .ok()
+                .flatten()
+                .map(|shortcut| key.matches_shortcut(&shortcut))
+                .unwrap_or(false);
+            trigger_match || legacy.is_some() && button.key == legacy
+        })
+        .cloned()
 }
 
 fn build_bindings_for(
@@ -230,10 +366,14 @@ pub struct KeyboardManager {
 }
 
 impl KeyboardManager {
-    pub fn new(core: Arc<AppCore>, device_receiver: Receiver<DeviceKeyEvent>) -> Arc<Self> {
+    pub fn new(
+        core: Arc<AppCore>,
+        device_receiver: Receiver<DeviceKeyEvent>,
+        device_sender: Sender<DeviceKeyEvent>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             core,
-            context: Arc::new(HookContext::new()),
+            context: Arc::new(HookContext::new(device_sender)),
             thread: Mutex::new(None),
             thread_id: AtomicU32::new(0),
             running: AtomicBool::new(false),
@@ -348,7 +488,7 @@ impl KeyboardManager {
         self.pressed.lock().unwrap().clear();
     }
 
-    /// Rebuilds the informational key -> button map from the active profile.
+    /// Rebuilds the shown shortcuts and the set of keys the hook captures.
     pub fn reload(&self) -> Result<usize, String> {
         let (bindings, problems) = build_bindings(&self.core);
         for problem in &problems {
@@ -360,6 +500,11 @@ impl KeyboardManager {
             .bindings
             .lock()
             .expect("bindings lock poisoned") = bindings;
+        *self
+            .context
+            .swallow
+            .lock()
+            .expect("capture lock poisoned") = capture_keys(&self.core);
         Ok(count)
     }
 
@@ -433,6 +578,9 @@ fn device_worker_loop(
     pressed: Arc<Mutex<HashSet<(String, String)>>>,
     shutdown: Arc<AtomicBool>,
 ) {
+    // A swallowed key can also arrive through Raw Input; run its macro once.
+    let mut last_fired: HashMap<String, Instant> = HashMap::new();
+
     for event in receiver {
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -466,37 +614,11 @@ fn device_worker_loop(
         let Some(profile) = config.active_profile(core.gaming()) else {
             continue;
         };
-        let legacy = key.legacy_key();
 
-        let button = profile
-            .buttons
-            .iter()
-            .find(|button| {
-                if !button.enabled {
-                    return false;
-                }
-                // Stable physical identity wins: labels and NumLock can change,
-                // but scan code + extended flag cannot.
-                if let Some(id) = button
-                    .physical_key_id
-                    .as_deref()
-                    .and_then(KeyId::parse)
-                {
-                    if id == key {
-                        return true;
-                    }
-                }
-                let trigger_match = button
-                    .effective_trigger()
-                    .ok()
-                    .flatten()
-                    .map(|shortcut| key.matches_shortcut(&shortcut))
-                    .unwrap_or(false);
-                trigger_match || legacy.is_some() && button.key == legacy
-            })
-            .cloned();
-
-        let Some(button) = button else {
+        // Stable physical identity wins: labels and NumLock can change, but
+        // scan code + extended flag cannot. Shared with the capture decision in
+        // `device.rs` so a swallowed key always has a macro behind it.
+        let Some(button) = find_button_for_key(&config, core.gaming(), &key) else {
             crate::logging::info(format!(
                 "no assignment for {} on {}",
                 event.key_id, profile.name
@@ -504,9 +626,18 @@ fn device_worker_loop(
             continue;
         };
 
+        let now = Instant::now();
+        if last_fired
+            .get(&event.key_id)
+            .is_some_and(|previous| now.duration_since(*previous) < Duration::from_millis(150))
+        {
+            continue;
+        }
+        last_fired.insert(event.key_id.clone(), now);
+
         crate::logging::info(format!(
-            "{} on selected keypad -> {} ({})",
-            event.key_id, button.name, button.id
+            "{} on {} -> {} ({})",
+            event.key_id, event.device_id, button.name, button.id
         ));
         let _ = core.app().emit(
             "macro-action-started",
@@ -532,17 +663,9 @@ fn device_worker_loop(
             core.set_gaming(false);
         }
 
-        let (bindings, problems) = build_bindings(&core);
-        for problem in problems {
-            crate::logging::warn(format!("shortcut: {}", problem));
+        if let Err(error) = core.app().state::<Arc<KeyboardManager>>().reload() {
+            crate::logging::warn(format!("cannot refresh shortcuts: {}", error));
         }
-        *core
-            .app()
-            .state::<Arc<KeyboardManager>>()
-            .context
-            .bindings
-            .lock()
-            .unwrap() = bindings;
 
         let event_name = if results_have_error(&results) {
             "macro-action-error"
@@ -595,7 +718,8 @@ mod tests {
     use crate::models::{AppConfig, ButtonAction, MacroButton, Profile};
 
     fn context_with(shortcut: &str, button_id: &str) -> Arc<HookContext> {
-        let context = Arc::new(HookContext::new());
+        let (sender, _receiver) = channel::<DeviceKeyEvent>();
+        let context = Arc::new(HookContext::new(sender));
         let parsed = Shortcut::parse(shortcut).unwrap();
         context.bindings.lock().unwrap().insert(
             parsed,

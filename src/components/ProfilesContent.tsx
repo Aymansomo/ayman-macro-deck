@@ -10,12 +10,7 @@ import {
 } from "../lib/backend";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 
-interface Props {
-  open: boolean;
-  onClose: () => void;
-}
-
-export function ProfileManager({ open, onClose }: Props) {
+export function ProfilesContent() {
   const config = useAppStore((s) => s.config);
   const setActiveProfile = useAppStore((s) => s.setActiveProfile);
   const createProfile = useAppStore((s) => s.createProfile);
@@ -45,9 +40,8 @@ export function ProfileManager({ open, onClose }: Props) {
   }, [renamingId]);
 
   useEffect(() => {
-    if (!open) return;
     void listConfigBackups().then(setBackups).catch(() => setBackups([]));
-  }, [open]);
+  }, []);
 
   const syncConfig = async () => {
     const json = await loadConfigRaw();
@@ -94,8 +88,6 @@ export function ProfileManager({ open, onClose }: Props) {
     }
   };
 
-  if (!open) return null;
-
   const handleCreate = () => {
     const trimmed = newName.trim();
     if (!trimmed) return;
@@ -132,26 +124,8 @@ export function ProfileManager({ open, onClose }: Props) {
   const deleteTargetProfile = config.profiles.find((p) => p.id === deleteTarget);
 
   return (
-    <div
-      className="fixed inset-0 z-[90] flex justify-end bg-black/40"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="profile-panel side-panel">
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
-          <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
-            Manage Profiles
-          </h2>
-          <button
-            onClick={onClose}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] transition-colors cursor-pointer"
-          >
-            ✕
-          </button>
-        </div>
-
+    <div className="space-y-5">
+      <div className="space-y-5">
         {/* Create new profile */}
         <div className="px-5 py-4 border-b border-[var(--color-border)]">
           <label className="text-xs text-[var(--color-text-muted)] mb-2 block">

@@ -9,6 +9,7 @@
 //! - `logging`    file log in `%APPDATA%\com.ayman.macrodeck\logs\app.log`
 
 mod actions;
+mod autostart;
 mod device;
 mod keyid;
 mod keyboard;
@@ -317,9 +318,33 @@ fn set_macro_device_collections(
     devices.set_include_collections(include)
 }
 
+/// Keypad capture: on = bound deck keys run their macro and never type, off =
+/// deck keys type normally again.
+#[tauri::command]
+fn set_macro_device_suppression(
+    suppress: bool,
+    devices: tauri::State<'_, Arc<RawInputManager>>,
+) -> Result<DeviceStatus, String> {
+    devices.set_suppress_legacy(suppress)
+}
+
 // --------------------------------------------------------------------------
 // tools: logs, config import/export, backups
 // --------------------------------------------------------------------------
+
+// --------------------------------------------------------------------------
+// startup
+// --------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_start_with_windows() -> bool {
+    autostart::is_enabled()
+}
+
+#[tauri::command]
+fn set_start_with_windows(enabled: bool) -> Result<bool, String> {
+    autostart::set_enabled(enabled)
+}
 
 #[tauri::command]
 fn open_logs_folder(app: tauri::AppHandle) -> Result<(), String> {
@@ -1114,7 +1139,7 @@ pub fn run() {
 
             let core = AppCore::new(app.handle().clone());
             let (device_tx, device_rx) = channel::<DeviceKeyEvent>();
-            let keyboard = KeyboardManager::new(core.clone(), device_rx);
+            let keyboard = KeyboardManager::new(core.clone(), device_rx, device_tx.clone());
             let devices = RawInputManager::new(app.handle().clone(), device_tx);
             RawInputManager::install(devices.clone());
 
@@ -1196,6 +1221,9 @@ pub fn run() {
             get_macro_engine_status,
             set_macro_engine_running,
             set_macro_device_collections,
+            set_macro_device_suppression,
+            get_start_with_windows,
+            set_start_with_windows,
             open_logs_folder,
             export_config,
             import_config,

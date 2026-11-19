@@ -1,83 +1,75 @@
-import { useState } from "react";
 import { useAppStore } from "../store";
 import type { MacroEngineStatus } from "../lib/backend";
-import { ProfileManager } from "./ProfileManager";
+import { Icon } from "./Icon";
 import { UpdateButton } from "./UpdateButton";
-import { SteamAccountsPanel } from "./SteamAccountsPanel";
-import { SettingsPanel } from "./SettingsPanel";
 
 interface Props {
   engineStatus: MacroEngineStatus | null;
-  onOpenDeviceManager: () => void;
+  onOpenSettings: () => void;
 }
 
-export function Header({ engineStatus, onOpenDeviceManager }: Props) {
+export function Header({ engineStatus, onOpenSettings }: Props) {
   const config = useAppStore((s) => s.config);
-  const [managerOpen, setManagerOpen] = useState(false);
-  const [steamOpen, setSteamOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const isGamingMode = useAppStore((s) => s.isGamingMode);
   const activeProfile = config.profiles.find(
     (p) => p.id === config.activeProfileId,
   );
-  const device = engineStatus?.device;
-  const deviceTone = !device?.selectedId
-    ? "bg-[var(--color-danger)]"
-    : device.selectedConnected
-      ? "bg-[var(--color-success)]"
-      : "bg-[var(--color-warning)]";
+
+  const paused = engineStatus?.keyboard.paused ?? false;
+  const running = engineStatus?.keyboard.running ?? false;
+  const engineTone = !running
+    ? "var(--color-danger)"
+    : paused
+      ? "var(--color-warning)"
+      : "var(--color-success)";
 
   return (
-    <>
-      <header className="app-header">
-        <div className="brand">
-          <span className="brand-mark">AM</span>
-          <div>
-            <div className="brand-title">AYMAN MACRO DECK</div>
-            <div className="brand-subtitle">Control surface</div>
-          </div>
+    <header className="app-header">
+      <div className="brand">
+        <span className="brand-mark">AM</span>
+        <div className="min-w-0">
+          <div className="brand-title">AYMAN MACRO DECK</div>
+          <div className="brand-subtitle">Control surface</div>
         </div>
-        <div className="header-actions">
-          <UpdateButton />
-          <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-            <span className="w-2 h-2 rounded-full bg-[var(--color-success)] inline-block" />
-            {activeProfile?.name ?? "No Profile"}
-          </div>
-          <button
-            onClick={onOpenDeviceManager}
-            className="relative w-8 h-8 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] border border-[var(--color-border)] hover:border-[var(--color-border-hover)] transition-colors cursor-pointer text-sm"
-            title="Device Manager — select the physical keypad"
-          >
-            ⌨
+      </div>
+
+      <div className="header-actions">
+        <div className="header-pill">
+          <span
+            className="status-dot"
+            style={{
+              background: isGamingMode
+                ? "var(--color-warning)"
+                : "var(--color-text-muted)",
+            }}
+          />
+          <span className="truncate max-w-[140px]">
+            {activeProfile?.name ?? "No profile"}
+          </span>
+          <span className="header-pill-sep" />
+          <span className="text-[var(--color-text-muted)]">
+            {isGamingMode ? "Gaming" : "Normal"}
+          </span>
+        </div>
+
+        <UpdateButton />
+
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="ui-btn ui-btn-ghost header-settings"
+          title="Settings — engine, keypad, phone, Steam, profiles"
+        >
+          <span className="relative flex items-center">
+            <Icon name="settings" size={15} />
             <span
-              className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-[var(--color-bg-primary)] ${deviceTone}`}
+              className="settings-dot"
+              style={{ background: engineTone }}
             />
-          </button>
-          <button
-            onClick={() => setSteamOpen(true)}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] border border-[var(--color-border)] hover:border-[var(--color-border-hover)] transition-colors cursor-pointer text-sm"
-            title="Steam Accounts"
-          >
-            🎮
-          </button>
-          <button
-            onClick={() => setSettingsOpen(true)}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] border border-[var(--color-border)] hover:border-[var(--color-border-hover)] transition-colors cursor-pointer text-sm"
-            title="Settings — phone remote & hotkeys"
-          >
-            🔧
-          </button>
-          <button
-            onClick={() => setManagerOpen(true)}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] border border-[var(--color-border)] hover:border-[var(--color-border-hover)] transition-colors cursor-pointer text-sm"
-            title="Manage Profiles"
-          >
-            ⚙
-          </button>
-        </div>
-      </header>
-      <ProfileManager open={managerOpen} onClose={() => setManagerOpen(false)} />
-      <SteamAccountsPanel open={steamOpen} onClose={() => setSteamOpen(false)} />
-      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-    </>
+          </span>
+          Settings
+        </button>
+      </div>
+    </header>
   );
 }
