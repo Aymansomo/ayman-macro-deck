@@ -37,12 +37,6 @@ function createDefaultButton(key: number, physicalKeyId?: string): MacroButton {
   };
 }
 
-function withLegacyPhysicalIds(buttons: MacroButton[]): MacroButton[] {
-  return buttons.map((button) => ({
-    ...button,
-    physicalKeyId: button.physicalKeyId ?? physicalIdForLegacyKey(button.key),
-  }));
-}
 
 function createProfileSwitchButton(
   key: 10 | 11,
@@ -85,364 +79,31 @@ function createDefaultProfile(name: string, layout: KeyboardLayout = "numpad"): 
   };
 }
 
-function createGamingProfile(): Profile {
-  const buttons: MacroButton[] = [
-    {
-      id: generateId(),
-      key: 1,
-      name: "Steam SOMO",
-      icon: "🎮",
-      description: "Switch to Steam SOMO",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "switch_steam_account",
-          name: "Switch Steam Account",
-          params: { account: "SOMO" },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 2,
-      name: "Spider-Man",
-      icon: "🕷️",
-      description: "Switch to spydey and launch Spider-Man",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "switch_steam_account",
-          name: "Switch Steam Account",
-          params: { account: "spydey" },
-        },
-        {
-          id: generateId(),
-          type: "launch_steam_game",
-          name: "Launch Steam Game",
-          params: { appId: "1817070", name: "Spider-Man" },
-          delayAfter: 5000,
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 3,
-      name: "Khazan",
-      icon: "⚔️",
-      description: "Switch to Khazan and launch The First Berserker",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "switch_steam_account",
-          name: "Switch Steam Account",
-          params: { account: "Khazan The Berserker" },
-        },
-        {
-          id: generateId(),
-          type: "launch_steam_game",
-          name: "Launch Steam Game",
-          params: { appId: "2680010", name: "The First Berserker: Khazan" },
-          delayAfter: 5000,
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 4,
-      name: "Discord",
-      icon: "💬",
-      description: "Open Discord",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_application",
-          name: "Open Application",
-          params: {
-            path: "C:\\Users\\Ayman\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Discord Inc\\Discord.lnk",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 5,
-      name: "Fortnite",
-      icon: "🔫",
-      description: "Launch Fortnite via Epic Games",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "launch_epic_game",
-          name: "Launch Epic Game",
-          params: {
-            appId: "Fortnite",
-            uri: "com.epicgames.launcher://apps/Fortnite?action=launch&silent=true",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 6,
-      name: "Bluetooth Audio",
-      icon: "🔊",
-      description: "Open Bluetooth Audio Receiver",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_application",
-          name: "Open Application",
-          params: {
-            path: "explorer.exe shell:AppsFolder\\55746MarkSmirnov.BluetoothAudioReveicer_xwrbx6997tsfc!App",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 7,
-      name: "WhatsApp",
-      icon: "💬",
-      description: "Open WhatsApp",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_application",
-          name: "Open Application",
-          params: {
-            path: "explorer.exe shell:AppsFolder\\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 8,
-      name: "Playnite",
-      icon: "🎮",
-      description: "Launch Playnite Fullscreen",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_application",
-          name: "Open Application",
-          params: {
-            path: "C:\\Users\\Ayman\\AppData\\Local\\Playnite\\Playnite.FullscreenApp.exe",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 9,
-      name: "YouTube",
-      icon: "▶️",
-      description: "Open YouTube",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_url",
-          name: "Open URL",
-          params: { url: "https://www.youtube.com/" },
-        },
-      ],
-    },
-    createProfileSwitchButton(10, "Gaming"),
-    createProfileSwitchButton(11, "Normal"),
-  ];
-  return {
-    id: generateId(),
-    name: "Gaming",
-    layout: "numpad",
-    buttons: withLegacyPhysicalIds(buttons),
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-}
+/**
+ * First-run configuration. It must be usable on any PC: no personal account
+ * names, no absolute paths that only exist on the developer's machine, and no
+ * actions that silently fail. A fresh install gets one Normal profile with the
+ * eleven numpad keys unassigned, ready for the user to fill in.
+ */
+function createDefaultConfig(): AppConfig {
+  const buttons: MacroButton[] = [];
+  for (let key = 1; key <= 11; key++) {
+    buttons.push(createDefaultButton(key));
+  }
 
-function createNormalProfile(): Profile {
-  const buttons: MacroButton[] = [
-    {
-      id: generateId(),
-      key: 1,
-      name: "Instagram DMs",
-      icon: "📩",
-      description: "Open Instagram direct inbox",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_url",
-          name: "Open URL",
-          params: { url: "https://www.instagram.com/direct/inbox/" },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 2,
-      name: "Headset",
-      icon: "🎧",
-      description: "Switch default audio to headset",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "change_audio_device",
-          name: "Change Audio Device",
-          params: { device: "Realtek HD Audio 2nd output" },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 3,
-      name: "Speakers",
-      icon: "🔊",
-      description: "Switch default audio to speakers",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "change_audio_device",
-          name: "Change Audio Device",
-          params: { device: "Haut-parleurs" },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 4,
-      name: "Spotify",
-      icon: "🎵",
-      description: "Open Spotify",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_url",
-          name: "Open URL",
-          params: { url: "spotify:" },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 5,
-      name: "Notion",
-      icon: "📝",
-      description: "Open Notion",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_application",
-          name: "Open Application",
-          params: {
-            path: "C:\\Users\\Ayman\\AppData\\Local\\Programs\\Notion\\Notion.exe",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 6,
-      name: "Bluetooth Audio",
-      icon: "🔊",
-      description: "Open Bluetooth Audio Receiver",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_application",
-          name: "Open Application",
-          params: {
-            path: "explorer.exe shell:AppsFolder\\55746MarkSmirnov.BluetoothAudioReveicer_xwrbx6997tsfc!App",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 7,
-      name: "WhatsApp",
-      icon: "💬",
-      description: "Open WhatsApp",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_application",
-          name: "Open Application",
-          params: {
-            path: "explorer.exe shell:AppsFolder\\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 8,
-      name: "Stremio",
-      icon: "🎬",
-      description: "Open Stremio",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_application",
-          name: "Open Application",
-          params: {
-            path: "C:\\Users\\Ayman\\AppData\\Local\\Programs\\Stremio\\stremio-shell-ng.exe",
-          },
-        },
-      ],
-    },
-    {
-      id: generateId(),
-      key: 9,
-      name: "YouTube",
-      icon: "▶️",
-      description: "Open YouTube",
-      enabled: true,
-      actions: [
-        {
-          id: generateId(),
-          type: "open_url",
-          name: "Open URL",
-          params: { url: "https://www.youtube.com/" },
-        },
-      ],
-    },
-    createProfileSwitchButton(10, "Gaming"),
-    createProfileSwitchButton(11, "Normal"),
-  ];
-  return {
+  const normalProfile: Profile = {
     id: generateId(),
     name: "Normal",
     layout: "numpad",
-    buttons: withLegacyPhysicalIds(buttons),
+    buttons,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
-}
 
-function createDefaultConfig(): AppConfig {
-  const gamingProfile = createGamingProfile();
-  const normalProfile = createNormalProfile();
   return {
     version: 1,
-    activeProfileId: gamingProfile.id,
-    profiles: [gamingProfile, normalProfile],
+    activeProfileId: normalProfile.id,
+    profiles: [normalProfile],
     settings: {
       general: {
         startWithWindows: false,
@@ -451,30 +112,17 @@ function createDefaultConfig(): AppConfig {
         notifications: true,
       },
       keyboard: {
-        ahkExecutablePath: "C:\\Program Files\\AutoHotkey\\v2\\AutoHotkey.exe",
-        ahkScriptPath:
-          "E:\\ayman\\ME\\Macro\\script\\steam_mode.ahk",
+        ahkExecutablePath: "",
+        ahkScriptPath: "",
       },
       steam: {
         steamExecutable: "C:\\Program Files (x86)\\Steam\\steam.exe",
-        profileShortcutsFolder: "E:\\ayman\\ME\\Macro\\script\\SteamProfiles",
-        profileShortcuts: {
-          SOMO: "E:\\ayman\\ME\\Macro\\script\\SteamProfiles\\Switch to SOMO  [Steam].lnk",
-          Tesk: "E:\\ayman\\ME\\Macro\\script\\SteamProfiles\\Switch to Tesk (Offline) [Steam].lnk",
-          spydey: "E:\\ayman\\ME\\Macro\\script\\SteamProfiles\\Switch to spydey (Offline) [Steam].lnk",
-          "Khazan The Berserker":
-            "E:\\ayman\\ME\\Macro\\script\\SteamProfiles\\Switch to Khazan The Berserker (Offline) [Steam].lnk",
-          "pixel malandro":
-            "E:\\ayman\\ME\\Macro\\script\\SteamProfiles\\Switch to pixel malandro (Offline) [Steam].lnk",
-        },
+        profileShortcutsFolder: "",
+        profileShortcuts: {},
       },
       audio: {
-        soundVolumeViewPath:
-          "E:\\ayman\\ME\\Macro\\SoundVolumeView\\SoundVolumeView.exe",
-        devices: {
-          Headset: "Realtek HD Audio 2nd output",
-          Speakers: "Haut-parleurs",
-        },
+        soundVolumeViewPath: "",
+        devices: {},
       },
       appearance: {
         accentColor: "#7c3aed",
@@ -898,8 +546,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           steam: {
             ...config.settings.steam,
             profileShortcutsFolder:
-              config.settings.steam?.profileShortcutsFolder ??
-              "E:\\ayman\\ME\\Macro\\script\\SteamProfiles",
+              config.settings.steam?.profileShortcutsFolder ?? "",
           },
           images: { ...IMAGE_DEFAULTS, ...config.settings?.images },
         },

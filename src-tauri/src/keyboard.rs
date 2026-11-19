@@ -1,15 +1,16 @@
 //! KeyboardManager — native keyboard engine.
 //!
-//! Isolation model (Stage 1):
-//! - The `WH_KEYBOARD_LL` hook is now a **pure observer**. It never consumes a
-//!   key and can never dispatch a macro, so the main keyboard cannot trigger
-//!   anything.
-//! - Macros are dispatched only from `DeviceKeyEvent`s produced by the Raw
-//!   Input manager, which verifies the originating `HANDLE` belongs to the
-//!   selected USB keypad.
+//! Isolation model:
+//! - Macros are dispatched from `DeviceKeyEvent`s produced by the Raw Input
+//!   manager, which verifies the originating `HANDLE` belongs to the selected
+//!   USB keypad. The main keyboard can never trigger a macro.
+//! - The `WH_KEYBOARD_LL` hook hides a bound deck key so it never types. It sets
+//!   no state of its own: it attributes each candidate key to a device through
+//!   the shared Raw Input record (see `deck_owns_key`), so the same scan code
+//!   pressed on the main keyboard is passed through untouched.
 //! - Actions still run through the one existing `actions::run_button` engine.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -74,10 +75,86 @@ pub struct KeyInput {
 /// cannot report a device, so these events carry their own source tag.
 const HOOK_SOURCE: &str = "hook";
 
-/// Bound deck keys are swallowed system-wide by the low-level hook so they never
-/// type. Windows cannot tell keyboards apart at this layer, so this applies to
-/// every device that sends the same scan code (a second numpad included).
+/// Bound deck keys are swallowed by the low-level hook so they never type.
+/// Windows cannot tell keyboards apart at this layer, so the hook asks the Raw
+/// Input records which device produced the key before hiding it.
 static SUPPRESS_BOUND_KEYS: AtomicBool = AtomicBool::new(true);
+
+/// A physical key event seen by the Raw Input listener, used to attribute a
+/// `WH_KEYBOARD_LL` callback (which carries no device) to a real keyboard.
+#[derive(Clone, Copy, Debug)]
+struct RawKeyRecord {
+    /// True when the record came from the selected macro keypad.
+    deck: bool,
+    scan: u16,
+    extended: bool,
+    down: bool,
+    at: Instant,
+}
+
+/// Raw Input and the low-level hook race for the same key press: either may be
+/// reported first. Records are kept this long and the hook waits briefly for the
+/// matching one instead of guessing (guessing would eat main-keyboard keys).
+const RAW_KEY_TTL: Duration = Duration::from_millis(150);
+const HOOK_RAW_WAIT: Duration = Duration::from_millis(6);
+
+static RAW_KEYS: Mutex<VecDeque<RawKeyRecord>> = Mutex::new(VecDeque::new());
+
+/// Called by the Raw Input listener for every physical key event it receives.
+/// `deck` is the same isolation verdict used to dispatch macros, so a key is
+/// only hidden when the selected keypad really produced it.
+pub fn record_raw_key(deck: bool, scan: u16, extended: bool, down: bool) {
+    let now = Instant::now();
+    let mut keys = RAW_KEYS.lock().unwrap();
+    while keys
+        .front()
+        .is_some_and(|key| now.duration_since(key.at) >= RAW_KEY_TTL)
+    {
+        keys.pop_front();
+    }
+    keys.push_back(RawKeyRecord {
+        deck,
+        scan,
+        extended,
+        down,
+        at: now,
+    });
+}
+
+/// Removes the newest unconsumed record for this exact key event and reports
+/// whether it came from the macro keypad. `None` means Raw Input has not
+/// reported the event yet.
+fn take_raw_key(scan: u16, extended: bool, down: bool) -> Option<bool> {
+    let now = Instant::now();
+    let mut keys = RAW_KEYS.lock().unwrap();
+    while keys
+        .front()
+        .is_some_and(|key| now.duration_since(key.at) >= RAW_KEY_TTL)
+    {
+        keys.pop_front();
+    }
+    let index = keys
+        .iter()
+        .rposition(|key| key.scan == scan && key.extended == extended && key.down == down)?;
+    keys.remove(index).map(|key| key.deck)
+}
+
+/// True only when the selected macro keypad produced this key. The main
+/// keyboard's identical key is never hidden or turned into a macro.
+fn deck_owns_key(scan: u16, extended: bool, down: bool) -> bool {
+    if let Some(deck) = take_raw_key(scan, extended, down) {
+        return deck;
+    }
+    let deadline = Instant::now() + HOOK_RAW_WAIT;
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+        if let Some(deck) = take_raw_key(scan, extended, down) {
+            return deck;
+        }
+    }
+    // Unknown source: keep typing unaffected rather than eat a main-keyboard key.
+    false
+}
 
 pub fn suppress_bound_keys() -> bool {
     SUPPRESS_BOUND_KEYS.load(Ordering::SeqCst)
@@ -181,7 +258,9 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
 
     let capture = suppress_bound_keys() && !context.paused.load(Ordering::SeqCst);
 
-    if down && capture && context.swallow.lock().unwrap().contains(&(scan, extended)) {
+    let captured = capture && context.swallow.lock().unwrap().contains(&(scan, extended));
+
+    if down && captured && deck_owns_key(scan, extended, true) {
         // Hide the key from every application and run its macro from the
         // action worker. Auto-repeat only counts as one press.
         let first_press = context
@@ -200,6 +279,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 
     if up && context.swallowed_down.lock().unwrap().remove(&(scan, extended)) {
+        let _ = take_raw_key(scan, extended, false);
         let _ = context.dispatch.send(DeviceKeyEvent {
             device_id: HOOK_SOURCE.to_string(),
             key_id: KeyId::from_raw(scan, extended, info.vkCode as u16).id(),
@@ -761,6 +841,18 @@ mod tests {
         context.observe(injected);
         assert_eq!(context.events.load(Ordering::Relaxed), 1);
         assert_eq!(context.physical_events.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn only_the_selected_keypad_owns_a_captured_key() {
+        record_raw_key(true, 0x50, true, true);
+        assert!(deck_owns_key(0x50, true, true), "the deck key is captured");
+
+        // Same scan code from the main keyboard (or an unknown source) must
+        // keep typing and never run a macro.
+        record_raw_key(false, 0x50, true, true);
+        assert!(!deck_owns_key(0x50, true, true));
+        assert!(!deck_owns_key(0x48, true, true), "unrecorded key passes through");
     }
 
     #[test]

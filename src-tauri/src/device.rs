@@ -5,9 +5,9 @@
 //! "main keyboard never fires macros" rule.
 //!
 //! Raw Input never suppresses a key (blocking keys belongs to the low-level
-//! hook in `keyboard.rs`, where it is system-wide and device-blind). This module
-//! only identifies the source device, so the main keyboard can never fire a
-//! macro and a bound deck key can be hidden without touching typing.
+//! hook in `keyboard.rs`). This module reports which device produced each key, so
+//! the main keyboard can never fire a macro and a bound deck key can be hidden
+//! without touching typing on any other keyboard.
 
 use std::collections::HashSet;
 use std::ffi::c_void;
@@ -530,7 +530,11 @@ impl RawInputManager {
             return;
         }
 
-        let Some(selected) = self.selected.read().unwrap().clone() else { return };
+        let Some(selected) = self.selected.read().unwrap().clone() else {
+            // No keypad selected: nothing is the deck, so nothing is hidden.
+            crate::keyboard::record_raw_key(false, keyboard.MakeCode, extended, down);
+            return;
+        };
         let (connected, actual_hardware) = {
             let devices = self.devices.read().unwrap();
             let ids = devices.iter().map(|d| d.id.clone()).collect::<HashSet<_>>();
@@ -540,13 +544,16 @@ impl RawInputManager {
                 .map(|d| d.hardware_id.clone());
             (ids, hardware)
         };
-        if !should_dispatch(
+        let is_deck = should_dispatch(
             &actual_id,
             &selected,
             &connected,
             self.include_collections(),
             actual_hardware.as_deref(),
-        ) {
+        );
+        // The low-level hook reads this to decide whether to hide the key.
+        crate::keyboard::record_raw_key(is_deck, keyboard.MakeCode, extended, down);
+        if !is_deck {
             // Never fall back to another keyboard, even if it reports the same
             // physical key.
             return;

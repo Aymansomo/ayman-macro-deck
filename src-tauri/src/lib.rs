@@ -18,6 +18,7 @@ mod models;
 mod profiles;
 mod server;
 mod shortcut;
+mod single_instance;
 mod state;
 mod tray;
 
@@ -1124,6 +1125,13 @@ fn regenerate_pairing(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // One copy only: a second copy would install a second keyboard hook and
+    // fire every bound key twice.
+    if !single_instance::acquire() {
+        single_instance::warn_already_running();
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
