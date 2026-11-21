@@ -32,3 +32,6 @@ src-tauri/gen/schemas
 *.njsproj
 *.sln
 *.sw?
+
+# Local tooling cache
+.freebuff/

@@ -1,0 +1,73 @@
+name: Android APK
+
+# Builds the Capacitor mobile app and publishes the APK to GitHub Releases.
+# The store watches this repo and picks the newest published release that
+# contains an .apk, so desktop releases (v*) never block phone updates.
+#
+#   git tag mobile-v0.1.9
+#   git push origin mobile-v0.1.9
+#
+# Keep the tag version in sync with mobile-app/android/app/build.gradle
+# (versionName) and mobile-app/package.json (version).
+
+on:
+  push:
+    tags:
+      - 'mobile-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile-app/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install dependencies
+        working-directory: mobile-app
+        run: npm ci
+
+      - name: Build web assets and sync Capacitor
+        working-directory: mobile-app
+        run: |
+          npm run build
+          npx cap sync android
+
+      - name: Build signed debug APK
+        working-directory: mobile-app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --console=plain --no-daemon
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          cp mobile-app/android/app/build/outputs/apk/debug/app-debug.apk dist/AYMAN-DECK.apk
+          sha256sum dist/AYMAN-DECK.apk > dist/AYMAN-DECK.apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AYMAN-DECK-apk
+          path: dist/*
+
+      - name: Attach APK to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
