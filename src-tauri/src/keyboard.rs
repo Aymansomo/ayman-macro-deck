@@ -96,7 +96,11 @@ struct RawKeyRecord {
 /// reported first. Records are kept this long and the hook waits briefly for the
 /// matching one instead of guessing (guessing would eat main-keyboard keys).
 const RAW_KEY_TTL: Duration = Duration::from_millis(150);
-const HOOK_RAW_WAIT: Duration = Duration::from_millis(6);
+/// 25 ms is still far below the 300 ms hook timeout, and it only applies to a
+/// bound key whose Raw Input record has not arrived yet (a record normally ends
+/// the wait in about a millisecond). At 6 ms a busy system could miss it, and
+/// the key then typed its character *and* ran its macro.
+const HOOK_RAW_WAIT: Duration = Duration::from_millis(25);
 
 static RAW_KEYS: Mutex<VecDeque<RawKeyRecord>> = Mutex::new(VecDeque::new());
 

@@ -151,8 +151,11 @@ impl KeyId {
             Self::Function(11) => (0x57, false),
             Self::Function(12) => (0x58, false),
             Self::Function(_) => return None,
-            // The main letter/digit block has no single scan code identity here.
-            Self::Letter(_) | Self::Digit(_) => return None,
+            // Main letter/digit block: the inverse of `from_raw`. A macro
+            // keypad often sends ordinary scan codes, and without this the key
+            // was never hidden, so it typed its character *and* ran its macro.
+            Self::Letter(letter) => (letter_scan(*letter)?, false),
+            Self::Digit(digit) => (digit_scan(*digit)?, false),
             Self::Other(scan, extended) => (*scan, *extended),
         })
     }
@@ -313,6 +316,58 @@ impl KeyId {
     }
 }
 
+/// Scan code (set 1, never E0) of a main-block letter key.
+fn letter_scan(letter: char) -> Option<u16> {
+    let scan = match letter.to_ascii_uppercase() {
+        'Q' => 0x10,
+        'W' => 0x11,
+        'E' => 0x12,
+        'R' => 0x13,
+        'T' => 0x14,
+        'Y' => 0x15,
+        'U' => 0x16,
+        'I' => 0x17,
+        'O' => 0x18,
+        'P' => 0x19,
+        'A' => 0x1E,
+        'S' => 0x1F,
+        'D' => 0x20,
+        'F' => 0x21,
+        'G' => 0x22,
+        'H' => 0x23,
+        'J' => 0x24,
+        'K' => 0x25,
+        'L' => 0x26,
+        'Z' => 0x2C,
+        'X' => 0x2D,
+        'C' => 0x2E,
+        'V' => 0x2F,
+        'B' => 0x30,
+        'N' => 0x31,
+        'M' => 0x32,
+        _ => return None,
+    };
+    Some(scan)
+}
+
+/// Scan code (set 1, never E0) of a main-block number-row key.
+fn digit_scan(digit: char) -> Option<u16> {
+    let scan = match digit {
+        '0' => 0x0B,
+        '1' => 0x02,
+        '2' => 0x03,
+        '3' => 0x04,
+        '4' => 0x05,
+        '5' => 0x06,
+        '6' => 0x07,
+        '7' => 0x08,
+        '8' => 0x09,
+        '9' => 0x0A,
+        _ => return None,
+    };
+    Some(scan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +412,27 @@ mod tests {
             assert_eq!(KeyId::parse(&key.id()), Some(key));
         }
         assert_eq!(KeyId::parse("Numpad42"), None);
+    }
+
+    #[test]
+    fn main_block_keys_have_scan_codes() {
+        // A macro keypad that sends ordinary scan codes must be swallowed, so
+        // the key reaches the deck and never the focused window.
+        assert_eq!(KeyId::Digit('2').scan(), Some((0x03, false)));
+        assert_eq!(KeyId::Letter('A').scan(), Some((0x1E, false)));
+        assert_eq!(KeyId::Digit('0').scan(), Some((0x0B, false)));
+
+        // And the inverse has to agree with `from_raw` for every one of them.
+        for digit in '0'..='9' {
+            let key = KeyId::Digit(digit);
+            let (scan, extended) = key.scan().expect("digit has a scan code");
+            assert_eq!(KeyId::from_raw(scan, extended, 0), key);
+        }
+        for letter in 'A'..='Z' {
+            let key = KeyId::Letter(letter);
+            let (scan, extended) = key.scan().expect("letter has a scan code");
+            assert_eq!(KeyId::from_raw(scan, extended, 0), key);
+        }
     }
 
     #[test]
