@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppConfig,
   Profile,
+  ProfileApp,
+  ProfilePage,
   MacroButton,
   KeyboardLayout,
 } from "../types";
@@ -15,6 +17,36 @@ import {
 
 function generateId(): string {
   return crypto.randomUUID().slice(0, 8);
+}
+
+/** Returns a copy of the config with one profile replaced. */
+function withProfile(
+  config: AppConfig,
+  profileId: string,
+  update: (profile: Profile) => Profile,
+): AppConfig {
+  return {
+    ...config,
+    profiles: config.profiles.map((profile) =>
+      profile.id === profileId ? update(profile) : profile,
+    ),
+  };
+}
+
+function withButtons(
+  config: AppConfig,
+  profileId: string,
+  update: (buttons: MacroButton[]) => MacroButton[],
+): AppConfig {
+  return withProfile(config, profileId, (profile) => ({
+    ...profile,
+    buttons: update(profile.buttons),
+    pages: (profile.pages ?? []).map((page) => ({
+      ...page,
+      buttons: update(page.buttons),
+    })),
+    updatedAt: Date.now(),
+  }));
 }
 
 function physicalIdForLegacyKey(key: number): string | undefined {
@@ -110,6 +142,7 @@ function createDefaultConfig(): AppConfig {
         minimizeToTray: true,
         startMinimized: false,
         notifications: true,
+        autoSwitchProfiles: true,
       },
       keyboard: {
         ahkExecutablePath: "",
@@ -152,13 +185,25 @@ interface AppStore {
   ensureButtonForPhysicalKey: (
     profileId: string,
     physicalKeyId: string,
+    pageId?: string | null,
   ) => string | null;
+  addPage: (profileId: string, name: string) => string;
+  renamePage: (profileId: string, pageId: string, name: string) => void;
+  deletePage: (profileId: string, pageId: string) => void;
   setButtonPhysicalKey: (buttonId: string, physicalKeyId: string) => boolean;
   setProfileLayout: (profileId: string, layout: KeyboardLayout) => void;
   createProfile: (name: string) => void;
   deleteProfile: (profileId: string) => void;
   renameProfile: (profileId: string, name: string) => void;
   duplicateProfile: (profileId: string, newName: string) => void;
+  setProfileLinkedApp: (profileId: string, app: string) => void;
+  addProfileApp: (profileId: string, path: string) => void;
+  updateProfileApp: (
+    profileId: string,
+    appId: string,
+    patch: Partial<ProfileApp>,
+  ) => void;
+  removeProfileApp: (profileId: string, appId: string) => void;
   setImageSearchApiKey: (key: string) => void;
   setSteamProfilesFolder: (folder: string) => void;
   updateKeyboardSettings: (
@@ -168,6 +213,7 @@ interface AppStore {
   renameSteamAccount: (oldName: string, newName: string) => void;
   removeSteamAccount: (account: string) => void;
   setGamingMode: (on: boolean) => void;
+  setAutoSwitchProfiles: (enabled: boolean) => void;
   setKeyboardConnected: (connected: boolean) => void;
   loadConfig: (config: AppConfig) => void;
   saveConfig: () => Promise<void>;
@@ -227,21 +273,31 @@ function inferPhysicalKeyId(button: MacroButton): string | undefined {
   return physicalIdForLegacyKey(button.key);
 }
 
+function normalizeButton(button: MacroButton): MacroButton {
+  const physicalKeyId = inferPhysicalKeyId(button);
+  return {
+    ...button,
+    physicalKeyId,
+    icon: repairMojibake(button.icon),
+    description: repairMojibake(button.description),
+  };
+}
+
 export function normalizeProfile(profile: Profile): Profile {
   const cleaned: Profile & { oldKeyboardButtons?: never } = {
     ...profile,
     layout: normalizeLayout(profile.layout),
     buttons: Array.isArray(profile.buttons)
-      ? profile.buttons.map((button) => {
-          const physicalKeyId = inferPhysicalKeyId(button);
-          return {
-            ...button,
-            physicalKeyId,
-            icon: repairMojibake(button.icon),
-            description: repairMojibake(button.description),
-          };
-        })
+      ? profile.buttons.map(normalizeButton)
       : Array.from({ length: 11 }, (_, i) => createDefaultButton(i + 1)),
+    pages: Array.isArray(profile.pages)
+      ? profile.pages.map((page) => ({
+          ...page,
+          buttons: Array.isArray(page.buttons)
+            ? page.buttons.map(normalizeButton)
+            : [],
+        }))
+      : [],
   };
   delete cleaned.oldKeyboardButtons;
   return cleaned;
@@ -260,43 +316,63 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   updateButton: (profileId, button) =>
     set((state) => ({
-      config: {
-        ...state.config,
-        profiles: state.config.profiles.map((p) =>
-          p.id === profileId
-            ? {
-                ...p,
-                buttons: p.buttons.map((b) =>
-                  b.id === button.id ? button : b,
-                ),
-                updatedAt: Date.now(),
-              }
-            : p,
-        ),
-      },
+      config: withButtons(state.config, profileId, (buttons) =>
+        buttons.map((b) => (b.id === button.id ? button : b)),
+      ),
     })),
 
   removeButton: (profileId, buttonId) =>
     set((state) => ({
-      config: {
-        ...state.config,
-        profiles: state.config.profiles.map((p) =>
-          p.id === profileId
-            ? {
-                ...p,
-                buttons: p.buttons.filter((b) => b.id !== buttonId),
-                updatedAt: Date.now(),
-              }
-            : p,
-        ),
-      },
+      config: withButtons(state.config, profileId, (buttons) =>
+        buttons.filter((b) => b.id !== buttonId),
+      ),
     })),
 
-  ensureButtonForPhysicalKey: (profileId, physicalKeyId) => {
+  addPage: (profileId, name) => {
+    const page: ProfilePage = {
+      id: generateId(),
+      name: name.trim() || "Page",
+      buttons: [],
+    };
+    set((state) => ({
+      config: withProfile(state.config, profileId, (profile) => ({
+        ...profile,
+        pages: [...(profile.pages ?? []), page],
+        updatedAt: Date.now(),
+      })),
+    }));
+    return page.id;
+  },
+
+  renamePage: (profileId, pageId, name) =>
+    set((state) => ({
+      config: withProfile(state.config, profileId, (profile) => ({
+        ...profile,
+        pages: (profile.pages ?? []).map((page) =>
+          page.id === pageId
+            ? { ...page, name: name.trim() || page.name }
+            : page,
+        ),
+      })),
+    })),
+
+  deletePage: (profileId, pageId) =>
+    set((state) => ({
+      config: withProfile(state.config, profileId, (profile) => ({
+        ...profile,
+        pages: (profile.pages ?? []).filter((page) => page.id !== pageId),
+      })),
+    })),
+
+  ensureButtonForPhysicalKey: (profileId, physicalKeyId, pageId) => {
     const profile = get().config.profiles.find((p) => p.id === profileId);
     if (!profile || !PHYSICAL_KEY_IDS.has(physicalKeyId)) return null;
 
-    const existing = profile.buttons.find(
+    const page = pageId
+      ? (profile.pages ?? []).find((candidate) => candidate.id === pageId)
+      : undefined;
+    const scope = page ? page.buttons : profile.buttons;
+    const existing = scope.find(
       (button) => button.physicalKeyId === physicalKeyId,
     );
     if (existing) return existing.id;
@@ -314,18 +390,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
       actions: [],
     };
     set((state) => ({
-      config: {
-        ...state.config,
-        profiles: state.config.profiles.map((p) =>
-          p.id === profileId
-            ? {
-                ...p,
-                buttons: [...p.buttons, button],
-                updatedAt: Date.now(),
-              }
-            : p,
-        ),
-      },
+      config: page
+        ? withProfile(state.config, profileId, (target) => ({
+            ...target,
+            pages: (target.pages ?? []).map((candidate) =>
+              candidate.id === page.id
+                ? { ...candidate, buttons: [...candidate.buttons, button] }
+                : candidate,
+            ),
+            updatedAt: Date.now(),
+          }))
+        : withProfile(state.config, profileId, (target) => ({
+            ...target,
+            buttons: [...target.buttons, button],
+            updatedAt: Date.now(),
+          })),
     }));
     return newId;
   },
@@ -376,6 +455,52 @@ export const useAppStore = create<AppStore>((set, get) => ({
             : p,
         ),
       },
+    })),
+
+  setProfileLinkedApp: (profileId, app) =>
+    set((state) => ({
+      config: {
+        ...state.config,
+        profiles: state.config.profiles.map((p) =>
+          p.id === profileId
+            ? { ...p, linkedApp: app.trim() || undefined }
+            : p,
+        ),
+      },
+    })),
+
+  addProfileApp: (profileId, path) =>
+    set((state) => ({
+      config: withProfile(state.config, profileId, (profile) => ({
+        ...profile,
+        apps: [
+          ...(profile.apps ?? []),
+          {
+            id: generateId(),
+            path: path.trim(),
+            args: "",
+            placement: "keep",
+          },
+        ],
+      })),
+    })),
+
+  updateProfileApp: (profileId, appId, patch) =>
+    set((state) => ({
+      config: withProfile(state.config, profileId, (profile) => ({
+        ...profile,
+        apps: (profile.apps ?? []).map((app) =>
+          app.id === appId ? { ...app, ...patch } : app,
+        ),
+      })),
+    })),
+
+  removeProfileApp: (profileId, appId) =>
+    set((state) => ({
+      config: withProfile(state.config, profileId, (profile) => ({
+        ...profile,
+        apps: (profile.apps ?? []).filter((app) => app.id !== appId),
+      })),
     })),
 
   createProfile: (name) => {
@@ -535,6 +660,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }),
 
   setGamingMode: (on) => set({ isGamingMode: on }),
+
+  setAutoSwitchProfiles: (enabled) =>
+    set((state) => ({
+      config: {
+        ...state.config,
+        settings: {
+          ...state.config.settings,
+          general: {
+            ...state.config.settings.general,
+            autoSwitchProfiles: enabled,
+          },
+        },
+      },
+    })),
   setKeyboardConnected: (connected) => set({ keyboardConnected: connected }),
   loadConfig: (config) =>
     set({

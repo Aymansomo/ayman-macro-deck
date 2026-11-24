@@ -120,6 +120,9 @@ pub fn duplicate_in(config: &mut AppConfig, id: &str, name: &str) -> Result<Prof
     for button in &mut copy.buttons {
         button.id = new_id();
     }
+    for app in &mut copy.apps {
+        app.id = new_id();
+    }
 
     config.profiles.push(copy.clone());
     Ok(copy)
@@ -183,7 +186,10 @@ pub fn delete(core: &Arc<AppCore>, id: &str) -> Result<(), String> {
 pub fn set_active(core: &Arc<AppCore>, id: &str) -> Result<(), String> {
     let mut config = core.config();
     set_active_in(&mut config, id)?;
-    core.set_config(config)
+    let apps = config.profile(id).map(|p| p.apps.clone()).unwrap_or_default();
+    core.set_config(config)?;
+    crate::apps::apply(&apps);
+    Ok(())
 }
 
 #[cfg(test)]

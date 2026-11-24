@@ -1,16 +1,14 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store";
-import { ACTION_REGISTRY, createAction, getActionDef } from "../lib/actionRegistry";
+import { ActionEditor } from "./ActionEditor";
 import { keyLabel } from "../lib/keyboardLayouts";
 import { getApplicationInfo } from "../lib/backend";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 import type {
-  MacroButton,
   ButtonAction,
-  ParamField,
-  ActionDefinition,
+  MacroButton,
   ImageSearchResult,
 } from "../types";
 
@@ -45,7 +43,6 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
 
   const [draft, setDraft] = useState<MacroButton>(button);
   const [saved, setSaved] = useState(false);
-  const draftRef = useRef<MacroButton>(button);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -60,10 +57,12 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [triggerError, setTriggerError] = useState("");
   const [appPickerError, setAppPickerError] = useState("");
-
-  useEffect(() => {
-    draftRef.current = draft;
-  }, [draft]);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // Which action set is being edited: tap, hold (long press) or the second
+  // state of a toggle button.
+  const [actionTab, setActionTab] = useState<"press" | "long" | "alternate">(
+    "press",
+  );
 
   useEffect(() => {
     setDraft(button);
@@ -77,6 +76,8 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
     setConfirmRemove(false);
     setTriggerError(validateTrigger(button.trigger ?? ""));
     setAppPickerError("");
+    setAdvancedOpen(false);
+    setActionTab("press");
   }, [button.id]);
 
   const activeProfile = config.profiles.find(
@@ -88,44 +89,6 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
 
   const patch = (changes: Partial<MacroButton>) => {
     setDraft((prev) => ({ ...prev, ...changes }));
-    setSaved(false);
-  };
-
-  const patchAction = (actionId: string, changes: Partial<ButtonAction>) => {
-    setDraft((prev) => ({
-      ...prev,
-      actions: prev.actions.map((a) =>
-        a.id === actionId ? { ...a, ...changes } : a,
-      ),
-    }));
-    setSaved(false);
-  };
-
-  const addAction = (type: string) => {
-    const action = createAction(type);
-    setDraft((prev) => ({ ...prev, actions: [...prev.actions, action] }));
-    setSaved(false);
-    if (type === "open_application") {
-      void chooseApplication(action.id);
-    }
-  };
-
-  const removeAction = (actionId: string) => {
-    setDraft((prev) => ({
-      ...prev,
-      actions: prev.actions.filter((a) => a.id !== actionId),
-    }));
-    setSaved(false);
-  };
-
-  const moveAction = (index: number, dir: -1 | 1) => {
-    setDraft((prev) => {
-      const actions = [...prev.actions];
-      const newIndex = index + dir;
-      if (newIndex < 0 || newIndex >= actions.length) return prev;
-      [actions[index], actions[newIndex]] = [actions[newIndex], actions[index]];
-      return { ...prev, actions };
-    });
     setSaved(false);
   };
 
@@ -208,17 +171,31 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
       if (typeof selected !== "string") return;
 
       const info = await getApplicationInfo(selected);
-      patchAction(actionId, {
-        name: `Open ${info.name}`,
-        params: { path: info.path },
-      });
-
-      const buttonPatch: Partial<MacroButton> = { name: info.name };
-      if (info.iconPath) buttonPatch.imagePath = info.iconPath;
-      if (!draft.description.trim()) {
-        buttonPatch.description = `Opens ${info.name}`;
-      }
-      patch(buttonPatch);
+      // The action can live in any of the three action sets.
+      const patchSet = (list: ButtonAction[] | undefined) =>
+        list?.map((action) =>
+          action.id === actionId
+            ? {
+                ...action,
+                name: `Open ${info.name}`,
+                params: { ...action.params, path: info.path },
+              }
+            : action,
+        );
+      // Functional update: the action was added a moment ago, so a value
+      // captured before this dialog opened would drop it again.
+      setDraft((prev) => ({
+        ...prev,
+        name: prev.name.trim() ? prev.name : info.name,
+        description: prev.description.trim()
+          ? prev.description
+          : `Opens ${info.name}`,
+        imagePath: info.iconPath ?? prev.imagePath,
+        actions: patchSet(prev.actions) ?? [],
+        longPressActions: patchSet(prev.longPressActions),
+        alternateActions: patchSet(prev.alternateActions),
+      }));
+      setSaved(false);
     } catch (error) {
       setAppPickerError(
         typeof error === "string" ? error : "Could not choose that application.",
@@ -268,155 +245,152 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
     }
   };
 
+  const statusLine = running ? (
+    <span className="text-[var(--color-accent)]">Running…</span>
+  ) : lastAction ? (
+    <span
+      className={
+        lastAction.ok
+          ? "text-[var(--color-success)]"
+          : "text-[var(--color-danger)]"
+      }
+      title={lastAction.message}
+    >
+      {lastAction.ok ? "✓" : "✕"} {lastAction.message}
+    </span>
+  ) : null;
+
   return (
     <div className="button-editor">
-      {/* Header */}
-      <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
-            Edit Button
-          </h2>
-          {running && (
-            <div className="text-[9px] text-[var(--color-accent)] mt-0.5 animate-pulse">
-              Action running…
-            </div>
-          )}
-          {!running && lastAction && (
-            <div
-              className={`text-[9px] mt-0.5 truncate max-w-[150px] ${
-                lastAction.ok
-                  ? "text-[var(--color-success)]"
-                  : "text-[var(--color-danger)]"
-              }`}
-              title={lastAction.message}
-            >
-              {lastAction.ok ? "✓" : "✕"} {lastAction.message}
-            </div>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => patch({ enabled: !draft.enabled })}
-            className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-              draft.enabled
-                ? "bg-[var(--color-success)]/15 text-[var(--color-success)] border border-[var(--color-success)]/30"
-                : "bg-[var(--color-danger)]/15 text-[var(--color-danger)] border border-[var(--color-danger)]/30"
-            }`}
-          >
-            {draft.enabled ? "Enabled" : "Disabled"}
-          </button>
-          <button
-            onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] transition-colors cursor-pointer"
-          >
-            ✕
-          </button>
-        </div>
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
-        {/* Key */}
-        <Field label="PHYSICAL KEY">
-          <div className="flex items-center gap-2">
-            <span className="min-w-10 h-10 px-2 flex items-center justify-center rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-lg font-mono font-bold text-[var(--color-accent)]">
-              {draft.physicalKeyId ? keyLabel(draft.physicalKeyId) : draft.key}
-            </span>
-            <div className="min-w-0">
-              <div className="text-xs text-[var(--color-text-secondary)]">
-                {draft.physicalKeyId
-                  ? `Physical ID: ${draft.physicalKeyId}`
-                  : "Legacy slot (no physical ID yet)"}
-              </div>
-              <div className="text-[10px] text-[var(--color-text-muted)]">
-                Legacy slot {draft.key || "—"} · NumLock-independent
-              </div>
-            </div>
-          </div>
-        </Field>
-
-        {/* Trigger */}
-        <Field label="TRIGGER (optional)">
-          <div className="space-y-1.5">
-            <input
-              value={draft.trigger ?? ""}
-              onChange={(event) => {
-                const value = event.target.value;
-                setTriggerError(validateTrigger(value));
-                patch({ trigger: value.trim() ? value.trim() : undefined });
-              }}
-              placeholder="Numpad1  ·  Ctrl+Shift+Numpad4  ·  Scan035E0"
-              className={`w-full px-3 py-2 rounded-lg bg-[var(--color-bg-card)] border text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] ${
-                triggerError
-                  ? "border-[var(--color-danger)]"
-                  : "border-[var(--color-border)]"
-              }`}
-            />
-            <div className="text-[10px] text-[var(--color-text-muted)]">
-              Custom shortcut or calibrated scan-code key. Leave empty to use the
-              physical key shown above.
-            </div>
-            {triggerError && (
-              <div className="text-[10px] text-[var(--color-danger)]">
-                {triggerError}
-              </div>
-            )}
-          </div>
-        </Field>
-
-        {/* Image */}
-        <Field label="IMAGE">
-          <div className="flex items-center gap-3">
-            <div className="w-14 h-14 shrink-0 flex items-center justify-center rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] overflow-hidden">
+      {/* Header: live button preview, like a Stream Deck key */}
+      <div className="px-4 pt-4 pb-3 border-b border-[var(--color-border)]">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-14 h-14 shrink-0 rounded-xl bg-[var(--color-bg-card)] border border-[var(--color-border)] flex items-center justify-center overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
               {draft.imagePath ? (
                 <img
                   src={convertFileSrc(draft.imagePath)}
                   alt=""
                   draggable={false}
-                  className="max-w-full max-h-full object-contain"
+                  className="w-full h-full object-cover"
                 />
               ) : (
                 <span className="text-2xl">{draft.icon || "⬜"}</span>
               )}
             </div>
-            <div className="flex flex-col gap-2 flex-1 min-w-0">
-              <button
-                type="button"
-                onClick={pickImage}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--color-bg-card)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border-hover)] transition-colors cursor-pointer"
-              >
-                {draft.imagePath ? "Change image…" : "Choose image…"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSearchOpen((v) => !v)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
-                  searchOpen
-                    ? "bg-[var(--color-accent)]/15 border-[var(--color-accent)]/40 text-[var(--color-accent)]"
-                    : "bg-[var(--color-bg-card)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border-hover)]"
-                }`}
-              >
-                {searchOpen ? "Hide search" : "Search online…"}
-              </button>
-              {draft.imagePath && (
-                <button
-                  type="button"
-                  onClick={() => patch({ imagePath: undefined })}
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-[var(--color-danger)] bg-[var(--color-danger)]/10 border border-[var(--color-danger)]/30 hover:bg-[var(--color-danger)]/20 transition-colors cursor-pointer"
-                >
-                  Remove image
-                </button>
-              )}
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="px-1.5 py-0.5 rounded-md bg-[var(--color-bg-card)] border border-[var(--color-border)] text-[9px] font-mono text-[var(--color-text-secondary)]">
+                  {draft.physicalKeyId ? keyLabel(draft.physicalKeyId) : draft.key}
+                </span>
+                <span className="text-[10px] text-[var(--color-text-muted)]">
+                  {draft.actions.length}{" "}
+                  {draft.actions.length === 1 ? "action" : "actions"}
+                </span>
+              </div>
+              <h2 className="text-sm font-semibold text-[var(--color-text-primary)] truncate mt-0.5">
+                {draft.name.trim() || "Unnamed button"}
+              </h2>
+              <div className="text-[10px] truncate">{statusLine}</div>
             </div>
           </div>
-          {draft.imagePath && (
-            <p className="text-[10px] text-[var(--color-text-muted)] mt-1 break-all">
-              {draft.imagePath}
-            </p>
-          )}
-          <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
-            PNG, JPG, GIF, WEBP, BMP, SVG or ICO. Leave empty to use the emoji.
-          </p>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => patch({ enabled: !draft.enabled })}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer border ${
+                draft.enabled
+                  ? "bg-[var(--color-success)]/15 text-[var(--color-success)] border-[var(--color-success)]/30"
+                  : "bg-[var(--color-danger)]/15 text-[var(--color-danger)] border-[var(--color-danger)]/30"
+              }`}
+            >
+              {draft.enabled ? "On" : "Off"}
+            </button>
+            <button
+              onClick={onClose}
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card)] transition-colors cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
+        <div className="grid grid-cols-[1fr_auto] gap-2">
+          <div>
+            <label className="text-[10px] font-medium text-[var(--color-text-muted)] tracking-wider mb-1.5 block">
+              NAME
+            </label>
+            <input
+              type="text"
+              value={draft.name}
+              onChange={(e) => patch({ name: e.target.value })}
+              placeholder="Button name"
+              className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] transition-colors"
+            />
+          </div>
+          <div className="w-16">
+            <label className="text-[10px] font-medium text-[var(--color-text-muted)] tracking-wider mb-1.5 block">
+              ICON
+            </label>
+            <input
+              type="text"
+              value={draft.icon}
+              onChange={(e) => patch({ icon: e.target.value })}
+              placeholder="🎮"
+              className="w-full px-2 py-2 rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-center text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] transition-colors"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="text-[10px] font-medium text-[var(--color-text-muted)] tracking-wider mb-1.5 block">
+            DESCRIPTION
+          </label>
+          <input
+            type="text"
+            value={draft.description}
+            onChange={(e) => patch({ description: e.target.value })}
+            placeholder="What this button does"
+            className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] transition-colors"
+          />
+        </div>
+
+        {/* Image */}
+        <div>
+          <label className="text-[10px] font-medium text-[var(--color-text-muted)] tracking-wider mb-1.5 block">
+            BUTTON IMAGE
+          </label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={pickImage}
+              className="flex-1 px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-card)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border-hover)] transition-colors cursor-pointer"
+            >
+              {draft.imagePath ? "Change image…" : "Choose image…"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSearchOpen((v) => !v)}
+              className={`px-3 py-2 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                searchOpen
+                  ? "bg-[var(--color-accent)]/15 border-[var(--color-accent)]/40 text-[var(--color-accent)]"
+                  : "bg-[var(--color-bg-card)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border-hover)]"
+              }`}
+            >
+              {searchOpen ? "Hide" : "Search"}
+            </button>
+            {draft.imagePath && (
+              <button
+                type="button"
+                onClick={() => patch({ imagePath: undefined })}
+                className="px-3 py-2 rounded-lg text-xs font-medium text-[var(--color-danger)] bg-[var(--color-danger)]/10 border border-[var(--color-danger)]/30 hover:bg-[var(--color-danger)]/20 transition-colors cursor-pointer"
+              >
+                Clear
+              </button>
+            )}
+          </div>
 
           {searchOpen && (
             <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-3 space-y-2">
@@ -530,177 +504,210 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
               )}
             </div>
           )}
-        </Field>
+        </div>
 
-        {/* Emoji fallback */}
-        <Field label="EMOJI FALLBACK">
-          <input
-            type="text"
-            value={draft.icon}
-            onChange={(e) => patch({ icon: e.target.value })}
-            placeholder="🎮"
-            className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] transition-colors"
-          />
-        </Field>
-
-        {/* Name */}
-        <Field label="NAME">
-          <input
-            type="text"
-            value={draft.name}
-            onChange={(e) => patch({ name: e.target.value })}
-            placeholder="Button name"
-            className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] transition-colors"
-          />
-        </Field>
-
-        {/* Description */}
-        <Field label="DESCRIPTION">
-          <input
-            type="text"
-            value={draft.description}
-            onChange={(e) => patch({ description: e.target.value })}
-            placeholder="What this button does"
-            className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-card)] border border-[var(--color-border)] text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] transition-colors"
-          />
-        </Field>
-
-        {/* Actions / Macro */}
-        <div>
-          <Field label={`ACTIONS (${draft.actions.length})`}>
-            <></>
-          </Field>
-
-          <div className="space-y-3 mt-1">
-            {draft.actions.map((action, i) => {
-              const def = getActionDef(action.type);
-              return (
-                <div
-                  key={action.id}
-                  className="bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg overflow-hidden"
-                >
-                  {/* Action header */}
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)]">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm">{def?.icon ?? "⚡"}</span>
-                      <span className="text-xs font-medium text-[var(--color-text-primary)]">
-                        {def?.name ?? action.type}
-                      </span>
-                      <span className="text-[10px] text-[var(--color-text-muted)] font-mono">
-                        #{i + 1}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => moveAction(i, -1)}
-                        disabled={i === 0}
-                        className="w-6 h-6 flex items-center justify-center rounded text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card-hover)] disabled:opacity-20 disabled:cursor-not-allowed transition-colors cursor-pointer"
-                        title="Move up"
-                      >
-                        ▲
-                      </button>
-                      <button
-                        onClick={() => moveAction(i, 1)}
-                        disabled={i === draft.actions.length - 1}
-                        className="w-6 h-6 flex items-center justify-center rounded text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-card-hover)] disabled:opacity-20 disabled:cursor-not-allowed transition-colors cursor-pointer"
-                        title="Move down"
-                      >
-                        ▼
-                      </button>
-                      <button
-                        onClick={() => removeAction(action.id)}
-                        className="w-6 h-6 flex items-center justify-center rounded text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-danger)] hover:bg-red-500/10 transition-colors cursor-pointer"
-                        title="Remove"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Action params */}
-                  {def && def.paramSchema.length > 0 && (
-                    <div className="px-3 py-2 space-y-2">
-                      {def.paramSchema.map((field) => (
-                        <ParamInput
-                          key={field.key}
-                          field={field}
-                          def={def}
-                          value={String(action.params[field.key] ?? "")}
-                          onChange={(v) =>
-                            patchAction(action.id, {
-                              params: { ...action.params, [field.key]: v },
-                            })
-                          }
-                          onPickApplication={() => void chooseApplication(action.id)}
-                        />
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Delay */}
-                  <div className="px-3 py-2 border-t border-[var(--color-border)]">
-                    <div className="flex items-center gap-2">
-                      <label className="text-[10px] text-[var(--color-text-muted)]">
-                        Delay after (ms):
-                      </label>
-                      <input
-                        type="number"
-                        value={action.delayAfter ?? 0}
-                        onChange={(e) =>
-                          patchAction(action.id, {
-                            delayAfter: Number(e.target.value) || 0,
-                          })
-                        }
-                        min={0}
-                        step={500}
-                        className="w-20 px-2 py-1 rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors"
-                      />
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+        {/* Actions: tap, hold (long press) and the second toggle state */}
+        <div className="space-y-2">
+          <div className="flex items-center gap-1 rounded-lg bg-[var(--color-bg-card)]/60 border border-[var(--color-border)] p-1">
+            {(
+              [
+                {
+                  id: "press" as const,
+                  label: "Tap",
+                  count: draft.actions.length,
+                },
+                {
+                  id: "long" as const,
+                  label: "Hold",
+                  count: (draft.longPressActions ?? []).length,
+                },
+                {
+                  id: "alternate" as const,
+                  label: "2nd state",
+                  count: (draft.alternateActions ?? []).length,
+                },
+              ]
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActionTab(tab.id)}
+                className={`flex-1 px-2 py-1.5 rounded-md text-[11px] transition-colors cursor-pointer ${
+                  actionTab === tab.id
+                    ? "bg-[var(--color-accent)] text-white font-medium"
+                    : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-card-hover)]"
+                }`}
+              >
+                {tab.label}
+                {tab.count > 0 && (
+                  <span className="ml-1 opacity-70">{tab.count}</span>
+                )}
+              </button>
+            ))}
           </div>
 
-          {/* Add action */}
-          <div className="mt-3">
-            <select
-              onChange={(e) => {
-                if (e.target.value) {
-                  addAction(e.target.value);
-                  e.target.value = "";
+          {actionTab === "press" && (
+            <ActionEditor
+              actions={draft.actions}
+              onChange={(actions) => patch({ actions })}
+              onPickApplication={(actionId) => void chooseApplication(actionId)}
+              appPickerError={appPickerError}
+            />
+          )}
+
+          {actionTab === "long" && (
+            <div className="space-y-2">
+              <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+                Runs instead of the Tap actions when the key is held down.
+              </p>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-[var(--color-text-muted)]">
+                  Hold for
+                </span>
+                {[300, 450, 700, 1000].map((ms) => (
+                  <button
+                    key={ms}
+                    type="button"
+                    onClick={() => patch({ longPressMs: ms })}
+                    className={`px-2 py-1 rounded-md text-[10px] border transition-colors cursor-pointer ${
+                      (draft.longPressMs ?? 450) === ms
+                        ? "bg-[var(--color-accent)]/15 border-[var(--color-accent)]/40 text-[var(--color-accent)]"
+                        : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+                    }`}
+                  >
+                    {ms} ms
+                  </button>
+                ))}
+              </div>
+              <ActionEditor
+                actions={draft.longPressActions ?? []}
+                onChange={(longPressActions) =>
+                  patch({
+                    longPressActions,
+                    longPressMs: draft.longPressMs ?? 450,
+                  })
                 }
-              }}
-              defaultValue=""
-              className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-card)] border border-dashed border-[var(--color-border)] text-sm text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] transition-colors cursor-pointer appearance-none"
-            >
-              <option value="" disabled>
-                + Add Action
-              </option>
-              {ACTION_REGISTRY.map((def) => (
-                <option key={def.type} value={def.type}>
-                  {def.icon} {def.name}
-                </option>
-              ))}
-            </select>
-          </div>
+                onPickApplication={(actionId) =>
+                  void chooseApplication(actionId)
+                }
+                appPickerError={appPickerError}
+              />
+            </div>
+          )}
 
-          {appPickerError && (
-            <p className="text-[10px] text-[var(--color-danger)] mt-2">
-              {appPickerError}
-            </p>
+          {actionTab === "alternate" && (
+            <div className="space-y-2">
+              <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+                With actions here, every press flips the button between Tap and
+                this second state (on / off), and the deck remembers it while it
+                runs.
+              </p>
+              <ActionEditor
+                actions={draft.alternateActions ?? []}
+                onChange={(alternateActions) =>
+                  patch({
+                    alternateActions,
+                    toggle: alternateActions.length > 0,
+                  })
+                }
+                onPickApplication={(actionId) =>
+                  void chooseApplication(actionId)
+                }
+                appPickerError={appPickerError}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Advanced: physical key binding */}
+        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-card)]/40">
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((v) => !v)}
+            className="w-full flex items-center justify-between px-3 py-2.5 text-left cursor-pointer"
+          >
+            <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)]">
+              KEY BINDING
+            </span>
+            <span className="flex items-center gap-2 text-[10px] text-[var(--color-text-muted)]">
+              <span className="font-mono">
+                {draft.physicalKeyId
+                  ? `Physical: ${draft.physicalKeyId}`
+                  : `Slot ${draft.key || "—"}`}
+              </span>
+              <span>{advancedOpen ? "▲" : "▼"}</span>
+            </span>
+          </button>
+
+          {advancedOpen && (
+            <div className="px-3 pb-3 space-y-3 border-t border-[var(--color-border)]/70 pt-3">
+              <div className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+                Legacy slot {draft.key || "—"} · NumLock-independent. Use the
+                Device Manager to calibrate an unknown key.
+              </div>
+              <div>
+                <label className="text-[10px] text-[var(--color-text-muted)] mb-1 block">
+                  Custom trigger (optional)
+                </label>
+                <input
+                  value={draft.trigger ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setTriggerError(validateTrigger(value));
+                    patch({ trigger: value.trim() ? value.trim() : undefined });
+                  }}
+                  placeholder="Numpad1  ·  Ctrl+Shift+Numpad4  ·  Scan035E0"
+                  className={`w-full px-2 py-1.5 rounded-md bg-[var(--color-bg-primary)] border text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] ${
+                    triggerError
+                      ? "border-[var(--color-danger)]"
+                      : "border-[var(--color-border)]"
+                  }`}
+                />
+                {triggerError ? (
+                  <p className="text-[10px] text-[var(--color-danger)] mt-1">
+                    {triggerError}
+                  </p>
+                ) : (
+                  <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+                    Leave empty to use the physical key above.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="text-[10px] text-[var(--color-text-muted)] mb-1 block">
+                  Global hotkey (optional)
+                </label>
+                <input
+                  value={draft.globalHotkey ?? ""}
+                  onChange={(event) =>
+                    patch({
+                      globalHotkey: event.target.value.trim()
+                        ? event.target.value.trim()
+                        : undefined,
+                    })
+                  }
+                  placeholder="Ctrl+Alt+F9"
+                  className="w-full px-2 py-1.5 rounded-md bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+                />
+                <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
+                  Runs this button from any app, even with this window closed.
+                  Needs at least one modifier (Ctrl, Alt, Shift or Win).
+                </p>
+              </div>
+            </div>
           )}
         </div>
       </div>
 
       {/* Footer */}
-      <div className="flex items-center gap-2 px-5 py-4 border-t border-[var(--color-border)] bg-[var(--color-bg-primary)]">
+      <div className="flex items-center gap-2 px-4 py-3 border-t border-[var(--color-border)] bg-[var(--color-bg-primary)]">
         <button
           onClick={handleSave}
           disabled={!isDirty}
           className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          {saved ? "Saved ✓" : "Save"}
+          {saved && !isDirty ? "Saved ✓" : "Save"}
         </button>
         {isDirty && (
           <button
@@ -727,196 +734,6 @@ export function ButtonEditor({ button, onClose, running, lastAction }: Props) {
         danger
         onConfirm={handleRemove}
         onCancel={() => setConfirmRemove(false)}
-      />
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="text-[10px] font-medium text-[var(--color-text-muted)] tracking-wider mb-1.5 block">
-        {label}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-function ParamInput({
-  field,
-  def,
-  value,
-  onChange,
-  onPickApplication,
-}: {
-  field: ParamField;
-  def: ActionDefinition;
-  value: string | boolean;
-  onChange: (v: string | boolean) => void;
-  onPickApplication?: () => void;
-}) {
-  const [options, setOptions] = useState<string[]>(field.options ?? []);
-  const [loading, setLoading] = useState(false);
-  const profiles = useAppStore((s) => s.config.profiles);
-
-  // Older buttons store the profile name. Migrate them to the stable id so a
-  // later rename cannot break the button.
-  useEffect(() => {
-    if (def.type !== "switch_profile" || field.key !== "profile") return;
-    const current = String(value);
-    if (!current) return;
-    const legacy = profiles.find((p) => p.name === current && p.id !== current);
-    if (legacy) onChange(legacy.id);
-  }, [def.type, field.key, value, profiles, onChange]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (def.loadOptions) {
-      setLoading(true);
-      def
-        .loadOptions(field.key)
-        .then((opts) => {
-          if (!cancelled) setOptions(opts);
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false);
-        });
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [def, field.key]);
-
-  if (def.type === "switch_profile" && field.key === "profile") {
-    return (
-      <div>
-        <label className="text-[10px] text-[var(--color-text-muted)] mb-1 block">
-          {field.label}
-        </label>
-        <select
-          value={String(value)}
-          onChange={(e) => onChange(e.target.value)}
-          className="w-full px-2 py-1.5 rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors cursor-pointer"
-        >
-          <option value="" disabled>
-            Choose a profile
-          </option>
-          {String(value) &&
-            !profiles.some((p) => p.id === String(value)) && (
-              <option value={String(value)}>{String(value)} (missing)</option>
-            )}
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-        <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
-          Pressing this button&apos;s key on the macro keypad activates the selected profile.
-        </p>
-      </div>
-    );
-  }
-
-  if (def.type === "open_application" && field.key === "path") {
-    return (
-      <div>
-        <label className="text-[10px] text-[var(--color-text-muted)] mb-1 block">
-          {field.label}
-        </label>
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={String(value)}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder={field.placeholder}
-            className="flex-1 min-w-0 px-2 py-1.5 rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] font-mono outline-none focus:border-[var(--color-accent)] transition-colors"
-          />
-          <button
-            type="button"
-            onClick={onPickApplication}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--color-accent)]/15 border border-[var(--color-accent)]/40 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 transition-colors cursor-pointer whitespace-nowrap"
-          >
-            Choose app…
-          </button>
-        </div>
-        <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
-          Picking an app fills its icon, name and description automatically.
-        </p>
-      </div>
-    );
-  }
-
-  const isSelect = field.type === "select" || options.length > 0;
-
-  if (field.type === "boolean") {
-    const on = value === true || value === "true";
-    return (
-      <div className="flex items-center justify-between gap-2">
-        <label className="text-[10px] text-[var(--color-text-muted)]">
-          {field.label}
-        </label>
-        <button
-          type="button"
-          onClick={() => onChange(!on)}
-          className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
-            on
-              ? "bg-[var(--color-success)]/15 text-[var(--color-success)] border-[var(--color-success)]/30"
-              : "bg-[var(--color-bg-card)] text-[var(--color-text-muted)] border-[var(--color-border)]"
-          }`}
-        >
-          {on ? "ON" : "OFF"}
-        </button>
-      </div>
-    );
-  }
-
-  if (isSelect) {
-    return (
-      <div>
-        <label className="text-[10px] text-[var(--color-text-muted)] mb-1 block">
-          {field.label}
-        </label>
-        <select
-          value={String(value)}
-          onChange={(e) => onChange(e.target.value)}
-          className="w-full px-2 py-1.5 rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors cursor-pointer"
-        >
-          <option value="" disabled>
-            {loading ? "Loading..." : "Select..."}
-          </option>
-          {value !== "" &&
-            String(value) !== "" &&
-            !options.some((o) => o === String(value)) && (
-              <option value={String(value)}>{String(value)}</option>
-            )}
-          {options.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt}
-            </option>
-          ))}
-        </select>
-        {loading && (
-          <p className="text-[10px] text-[var(--color-text-muted)] mt-1">
-            Detecting devices...
-          </p>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <label className="text-[10px] text-[var(--color-text-muted)] mb-1 block">
-        {field.label}
-      </label>
-      <input
-        type="text"
-        value={String(value)}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={field.placeholder}
-        className="w-full px-2 py-1.5 rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] transition-colors"
       />
     </div>
   );

@@ -24,12 +24,48 @@ export interface MacroButton {
   backgroundColor?: string;
   iconColor?: string;
   actions: ButtonAction[];
+  /** Actions that run when the key is held down instead of tapped. */
+  longPressActions?: ButtonAction[];
+  /** Hold threshold in milliseconds (default 450). */
+  longPressMs?: number;
+  /** Press alternates between `actions` and `alternateActions`. */
+  toggle?: boolean;
+  alternateActions?: ButtonAction[];
+  /** System-wide hotkey such as `Ctrl+Alt+F9`. */
+  globalHotkey?: string;
+}
+
+/** A deck page (folder) with its own key assignments. */
+export interface ProfilePage {
+  id: string;
+  name: string;
+  buttons: MacroButton[];
+}
+
+export type ProfilePlacement = "keep" | "full" | "left" | "right" | "top" | "bottom";
+
+/** An app a profile starts (and optionally moves to a monitor) when activated. */
+export interface ProfileApp {
+  id: string;
+  path: string;
+  args?: string;
+  /** Zero-based index from `list_monitors()`; only a fallback for the name. */
+  monitor?: number;
+  /** Monitor device name, e.g. `DISPLAY2`: what survives rearranging screens. */
+  monitorName?: string;
+  placement?: ProfilePlacement;
 }
 
 export interface Profile {
   id: string;
   name: string;
   layout?: KeyboardLayout;
+  /** Executable name that activates this profile while it is in front. */
+  linkedApp?: string;
+  /** Apps started when this profile becomes active. */
+  apps?: ProfileApp[];
+  /** Extra pages (folders); `buttons` is the main page. */
+  pages?: ProfilePage[];
   buttons: MacroButton[];
   createdAt: number;
   updatedAt: number;
@@ -48,6 +84,8 @@ export interface AppSettings {
     minimizeToTray: boolean;
     startMinimized: boolean;
     notifications: boolean;
+    /** Switch profile automatically when a linked app is in the foreground. */
+    autoSwitchProfiles?: boolean;
   };
   keyboard: {
     ahkExecutablePath: string;
@@ -91,7 +129,14 @@ export interface ActionDefinition {
 export interface ParamField {
   key: string;
   label: string;
-  type: "text" | "number" | "select" | "path" | "boolean";
+  type:
+    | "text"
+    | "number"
+    | "select"
+    | "path"
+    | "boolean"
+    | "keycapture"
+    | "audiofile";
   options?: string[];
   placeholder?: string;
   defaultValue?: string | number | boolean;

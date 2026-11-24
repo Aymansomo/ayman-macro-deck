@@ -1,10 +1,15 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Header } from "./components/Header";
 import { DashboardBar } from "./components/DashboardBar";
 import { KeyboardEditor } from "./components/KeyboardEditor";
 import { ButtonEditor } from "./components/ButtonEditor";
 import { StatusBar } from "./components/StatusBar";
+import { PowerGuardBanner, type PowerWarning } from "./components/PowerGuardBanner";
+import {
+  ProfileToast,
+  type ProfileToastData,
+} from "./components/ProfileToast";
 import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import {
   getMacroEngineStatus,
@@ -12,6 +17,9 @@ import {
   listenDeviceEvent,
   listenMacroAction,
   listenMacroKey,
+  listenPowerActionArmed,
+  listenPowerActionConfirmed,
+  cancelPowerAction,
   type MacroActionEvent,
   type MacroEngineStatus,
 } from "./lib/backend";
@@ -42,6 +50,10 @@ function App() {
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
   const [runningButtonId, setRunningButtonId] = useState<string | null>(null);
   const [recentActions, setRecentActions] = useState<RecentAction[]>([]);
+  const [powerWarning, setPowerWarning] = useState<PowerWarning | null>(null);
+  const [profileToast, setProfileToast] = useState<ProfileToastData | null>(null);
+  // Last profile the backend reported, so a switch can be announced once.
+  const lastProfileId = useRef<string | null>(null);
 
   const appendRecentAction = useCallback((event: MacroActionEvent, ok: boolean) => {
     const message =
@@ -160,7 +172,24 @@ function App() {
       }),
     ];
 
-    const all = [...keySubscriptions, ...actionSubscriptions];
+    // Shutdown / restart only arm on the first press; the banner shows the
+    // countdown so the window never looks like the PC is already going down.
+    const powerSubscriptions = [
+      listenPowerActionArmed(({ actionType, label, windowSecs }) => {
+        setPowerWarning({
+          actionType,
+          label,
+          expiresAt: Date.now() + (windowSecs ?? 5) * 1000,
+        });
+      }),
+      listenPowerActionConfirmed(({ actionType }) => {
+        setPowerWarning((prev) =>
+          prev && prev.actionType === actionType ? null : prev,
+        );
+      }),
+    ];
+
+    const all = [...keySubscriptions, ...actionSubscriptions, ...powerSubscriptions];
     return () => {
       void Promise.all(all).then((unsubscribers) => {
         unsubscribers.forEach((off) => off());
@@ -185,6 +214,21 @@ function App() {
       if (state.gamingMode !== current.isGamingMode) {
         setGamingMode(state.gamingMode);
       }
+
+      // Announce every switch — keypad button, hotkey, auto-switch, editor —
+      // so the deck never changes what the keys do without saying so.
+      if (state.activeProfileId) {
+        if (lastProfileId.current === null) {
+          lastProfileId.current = state.activeProfileId;
+        } else if (lastProfileId.current !== state.activeProfileId) {
+          lastProfileId.current = state.activeProfileId;
+          setProfileToast({
+            id: crypto.randomUUID(),
+            name:
+              state.activeProfileName ?? state.activeProfileId,
+          });
+        }
+      }
     }).then((off) => {
       if (cancelled) off();
       else unlisten = off;
@@ -208,6 +252,17 @@ function App() {
     setSelectedButtonId(null);
   }, []);
 
+  const clearPowerWarning = useCallback(() => setPowerWarning(null), []);
+  const clearProfileToast = useCallback(() => setProfileToast(null), []);
+
+  // Cancel must reach the engine, otherwise the next press would still be
+  // treated as the confirming second press.
+  const handleCancelPower = useCallback(() => {
+    const armed = powerWarning;
+    setPowerWarning(null);
+    if (armed) void cancelPowerAction(armed.actionType).catch(() => {});
+  }, [powerWarning]);
+
   const openSettings = useCallback((tab: SettingsTab) => {
     setSettingsTab(tab);
     setSettingsOpen(true);
@@ -216,11 +271,23 @@ function App() {
   const activeProfile = config.profiles.find(
     (p) => p.id === config.activeProfileId,
   );
-  const selectedButton =
-    activeProfile?.buttons.find((b) => b.id === selectedButtonId) ?? null;
+  // A button can live on a page (folder) rather than the main page.
+  const selectedButton = activeProfile
+    ? (activeProfile.buttons.find((b) => b.id === selectedButtonId) ??
+      (activeProfile.pages ?? [])
+        .flatMap((page) => page.buttons)
+        .find((b) => b.id === selectedButtonId) ??
+      null)
+    : null;
 
   return (
     <div className="app-shell">
+      <PowerGuardBanner
+        warning={powerWarning}
+        onExpired={clearPowerWarning}
+        onCancel={handleCancelPower}
+      />
+      <ProfileToast toast={profileToast} onDone={clearProfileToast} />
       <Header
         engineStatus={engineStatus}
         onOpenSettings={() => openSettings("engine")}
@@ -248,14 +315,21 @@ function App() {
           )}
         </div>
         {selectedButton && (
-          <ButtonEditor
-            button={selectedButton}
-            onClose={handleCloseEditor}
-            running={runningButtonId === selectedButton.id}
-            lastAction={recentActions.find(
-              (action) => action.buttonId === selectedButton.id,
-            )}
-          />
+          <div
+            className="button-editor-overlay"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) handleCloseEditor();
+            }}
+          >
+            <ButtonEditor
+              button={selectedButton}
+              onClose={handleCloseEditor}
+              running={runningButtonId === selectedButton.id}
+              lastAction={recentActions.find(
+                (action) => action.buttonId === selectedButton.id,
+              )}
+            />
+          </div>
         )}
       </div>
       <StatusBar engineStatus={engineStatus} />

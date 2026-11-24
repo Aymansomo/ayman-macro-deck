@@ -129,11 +129,53 @@ export const ACTION_REGISTRY: ActionDefinition[] = [
   {
     type: "keyboard_shortcut",
     name: "Keyboard Shortcut",
-    description: "Send a keyboard shortcut",
+    description: "Click Record and press a key combination, e.g. Ctrl+A",
     icon: "⌨️",
     paramSchema: [
-      { key: "keys", label: "Keys", type: "text", placeholder: "Ctrl+Shift+M" },
+      { key: "keys", label: "Keys", type: "keycapture", placeholder: "Ctrl+Shift+M" },
     ],
+  },
+  {
+    type: "play_sound",
+    name: "Play Sound",
+    description: "Play an audio file such as a WAV or MP3",
+    icon: "🎵",
+    paramSchema: [
+      {
+        key: "path",
+        label: "Sound file",
+        type: "audiofile",
+        placeholder: "C:\\Sounds\\click.wav",
+      },
+    ],
+  },
+  {
+    type: "media_play_pause",
+    name: "Play / Pause Music",
+    description: "Pause or resume whatever music is playing",
+    icon: "⏯️",
+    paramSchema: [],
+  },
+  {
+    type: "media_next",
+    name: "Skip Track",
+    description: "Skip to the next song (Spotify, browser, any player)",
+    icon: "⏭️",
+    paramSchema: [],
+  },
+  {
+    type: "media_previous",
+    name: "Previous Track",
+    description: "Go back to the previous song",
+    icon: "⏮️",
+    paramSchema: [],
+  },
+  {
+    type: "media_stop",
+    name: "Stop Music",
+    description: "Stop the current music playback",
+    icon: "⏹️",
+    paramSchema: [],
   },
   {
     type: "volume_up",
@@ -154,6 +196,99 @@ export const ACTION_REGISTRY: ActionDefinition[] = [
     name: "Mute/Unmute",
     description: "Toggle system mute",
     icon: "🔇",
+    paramSchema: [],
+  },
+  {
+    type: "open_page",
+    name: "Open Page (Folder)",
+    description: "Jump to a deck page, or back to the main page",
+    icon: "📁",
+    paramSchema: [
+      {
+        key: "page",
+        label: "Page",
+        type: "select",
+        placeholder: "Main page (back)",
+      },
+    ],
+    async loadOptions() {
+      const state = useAppStore.getState();
+      const profile = state.config.profiles.find(
+        (candidate) => candidate.id === state.config.activeProfileId,
+      );
+      return ["Main", ...(profile?.pages ?? []).map((page) => page.name)];
+    },
+  },
+  {
+    type: "stop_all_audio",
+    name: "Stop All Sound",
+    description: "Stop every sound this deck is playing and the current music",
+    icon: "🔕",
+    paramSchema: [],
+  },
+  {
+    type: "lock_workstation",
+    name: "Lock PC",
+    description: "Lock Windows immediately",
+    icon: "🔒",
+    paramSchema: [],
+  },
+  {
+    type: "sleep_pc",
+    name: "Sleep",
+    description: "Put the PC to sleep",
+    icon: "🌙",
+    paramSchema: [],
+  },
+  {
+    type: "sign_out",
+    name: "Sign Out",
+    description: "Sign out of the current Windows user",
+    icon: "🚪",
+    paramSchema: [],
+  },
+  {
+    type: "restart_pc",
+    name: "Restart PC",
+    description:
+      "Restart Windows. Needs a second press within 5 seconds (or a hold) to confirm",
+    icon: "🔄",
+    paramSchema: [],
+  },
+  {
+    type: "shutdown_pc",
+    name: "Shut Down PC",
+    description:
+      "Shut Windows down. Needs a second press within 5 seconds (or a hold) to confirm",
+    icon: "⏻",
+    paramSchema: [],
+  },
+  {
+    type: "show_desktop",
+    name: "Show Desktop",
+    description: "Minimise everything (Win+D)",
+    icon: "🖥️",
+    paramSchema: [],
+  },
+  {
+    type: "task_manager",
+    name: "Task Manager",
+    description: "Open Windows Task Manager",
+    icon: "📊",
+    paramSchema: [],
+  },
+  {
+    type: "screenshot",
+    name: "Screenshot",
+    description: "Save a screenshot of every monitor to Pictures",
+    icon: "📸",
+    paramSchema: [],
+  },
+  {
+    type: "empty_recycle_bin",
+    name: "Empty Recycle Bin",
+    description: "Delete everything in the Recycle Bin",
+    icon: "🗑️",
     paramSchema: [],
   },
   {

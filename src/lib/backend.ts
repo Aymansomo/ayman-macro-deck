@@ -3,6 +3,52 @@ import { listen } from "@tauri-apps/api/event";
 
 export type KeyboardLayout = "full" | "numpad" | "numpadNav";
 
+export interface MonitorInfo {
+  index: number;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  primary: boolean;
+}
+
+export function listMonitors(): Promise<MonitorInfo[]> {
+  return invoke<MonitorInfo[]>("list_monitors");
+}
+
+export interface RunningApp {
+  pid: number;
+  title: string;
+  path: string;
+  name: string;
+}
+
+/** Apps that currently have a window (tray apps included). */
+export function listRunningApps(): Promise<RunningApp[]> {
+  return invoke<RunningApp[]>("list_running_apps");
+}
+
+/** Runs a profile's launch-on-activate apps right now, in the background. */
+export function applyProfileApps(profileId: string): Promise<void> {
+  return invoke<void>("apply_profile_apps", { profileId });
+}
+
+export interface ProfileAppResult {
+  profileId: string;
+  line: string;
+  done: boolean;
+}
+
+/** One finished app of a run, in order; `done` marks the last one. */
+export function listenProfileAppsResult(
+  handler: (event: ProfileAppResult) => void,
+) {
+  return listen<ProfileAppResult>("profile-apps-result", ({ payload }) =>
+    handler(payload),
+  );
+}
+
 export interface KeyboardDevice {
   id: string;
   name: string;
@@ -60,6 +106,14 @@ export interface MacroActionEvent {
   results?: string[];
   gamingMode?: boolean;
   shortcut?: string;
+}
+
+export interface PowerActionEvent {
+  /** "shutdown_pc" or "restart_pc". */
+  actionType: string;
+  label: string;
+  /** Only on the armed event: how long the confirmation stays open. */
+  windowSecs?: number;
 }
 
 export interface MacroKeyEvent {
@@ -136,12 +190,26 @@ export function openLogsFolder() {
   return invoke<void>("open_logs_folder");
 }
 
-export function exportConfig() {
-  return invoke<string>("export_config");
+export interface BackupSummary {
+  path: string;
+  profiles: number;
+  buttons: number;
 }
 
-export function importConfig(config: string) {
-  return invoke<void>("import_config", { config });
+/** Writes every profile, page, button, action and setting (plus the open page)
+ *  into one JSON file the user picks. */
+export function backupData(destination: string) {
+  return invoke<BackupSummary>("backup_data", { destination });
+}
+
+/** Restores a file written by `backupData`; the current config is backed up first. */
+export function restoreData(source: string) {
+  return invoke<BackupSummary>("restore_data", { source });
+}
+
+/** Opens %APPDATA%\com.ayman.macrodeck in Explorer. */
+export function openDataFolder() {
+  return invoke<void>("open_data_folder");
 }
 
 export function listConfigBackups() {
@@ -194,6 +262,23 @@ export interface DeckState {
 
 export function listenDeckState(handler: (state: DeckState) => void) {
   return listen<DeckState>("deck:state", ({ payload }) => handler(payload));
+}
+
+/** Shut Down / Restart was pressed once and is waiting for a confirmation. */
+export function listenPowerActionArmed(handler: (event: PowerActionEvent) => void) {
+  return listen<PowerActionEvent>("power-action-armed", ({ payload }) => handler(payload));
+}
+
+/** Cancels a pending Shut Down / Restart confirmation in the engine. */
+export function cancelPowerAction(actionType: string) {
+  return invoke<boolean>("cancel_power_action", { actionType });
+}
+
+/** The confirmation press ran the action, so its banner can go away. */
+export function listenPowerActionConfirmed(handler: (event: PowerActionEvent) => void) {
+  return listen<PowerActionEvent>("power-action-confirmed", ({ payload }) =>
+    handler(payload),
+  );
 }
 
 export function listenMacroKey(

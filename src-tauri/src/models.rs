@@ -40,6 +40,16 @@ pub struct Profile {
     /// Additive visual layout: `numpad`, `numpadNav` or `full`.
     /// Missing/invalid values are migrated to `numpad`; never removed.
     pub layout: Option<String>,
+    /// Application that activates this profile while it is in the foreground,
+    /// stored as an executable name (e.g. `Cyberpunk2077.exe`).
+    pub linked_app: Option<String>,
+    /// Apps started when this profile becomes active, each optionally placed on
+    /// a monitor (`full`, `left`, `right`, `top`, `bottom`) or left where it
+    /// opens (`keep`).
+    pub apps: Vec<ProfileApp>,
+    /// Extra deck pages (folders). A button with an `open_page` action switches
+    /// the deck to one of these; the profile's own buttons form the main page.
+    pub pages: Vec<ProfilePage>,
     pub buttons: Vec<MacroButton>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -53,9 +63,66 @@ impl Default for Profile {
             id: String::new(),
             name: String::new(),
             layout: None,
+            linked_app: None,
+            apps: Vec::new(),
+            pages: Vec::new(),
             buttons: Vec::new(),
             created_at: 0,
             updated_at: 0,
+            extra: JsonObject::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProfileApp {
+    pub id: String,
+    /// Executable, shortcut or document to start.
+    pub path: String,
+    pub args: String,
+    /// Zero-based monitor index from `list_monitors`; `None` keeps the default.
+    /// Only a fallback: the index moves when monitors are rearranged.
+    pub monitor: Option<u32>,
+    /// Device name of the monitor, e.g. `DISPLAY2`. This is what identifies the
+    /// screen across unplugging and rearranging; the index does not.
+    pub monitor_name: Option<String>,
+    /// `full`, `left`, `right`, `top`, `bottom` or `keep`.
+    pub placement: Option<String>,
+    #[serde(flatten)]
+    pub extra: JsonObject,
+}
+
+impl Default for ProfileApp {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            path: String::new(),
+            args: String::new(),
+            monitor: None,
+            monitor_name: None,
+            placement: None,
+            extra: JsonObject::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProfilePage {
+    pub id: String,
+    pub name: String,
+    pub buttons: Vec<MacroButton>,
+    #[serde(flatten)]
+    pub extra: JsonObject,
+}
+
+impl Default for ProfilePage {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            buttons: Vec::new(),
             extra: JsonObject::new(),
         }
     }
@@ -79,6 +146,15 @@ pub struct MacroButton {
     pub background_color: Option<String>,
     pub icon_color: Option<String>,
     pub actions: Vec<ButtonAction>,
+    /// Actions that run when the key is held down for `long_press_ms`.
+    pub long_press_actions: Vec<ButtonAction>,
+    /// Hold threshold in milliseconds; 450 when unset.
+    pub long_press_ms: Option<u64>,
+    /// Alternates between `actions` and `alternate_actions` on every press.
+    pub toggle: bool,
+    pub alternate_actions: Vec<ButtonAction>,
+    /// System-wide hotkey such as `Ctrl+Alt+F9` that runs this button.
+    pub global_hotkey: Option<String>,
     /// Native trigger, e.g. `"Numpad1"` or `"Ctrl+Shift+Numpad4"`.
     /// Falls back to `key` when missing.
     pub trigger: Option<String>,
@@ -101,6 +177,11 @@ impl Default for MacroButton {
             background_color: None,
             icon_color: None,
             actions: Vec::new(),
+            long_press_actions: Vec::new(),
+            long_press_ms: None,
+            toggle: false,
+            alternate_actions: Vec::new(),
+            global_hotkey: None,
             trigger: None,
             extra: JsonObject::new(),
         }
@@ -274,19 +355,88 @@ impl AppConfig {
 }
 
 impl Profile {
+    pub fn page(&self, id: &str) -> Option<&ProfilePage> {
+        self.pages.iter().find(|page| page.id == id)
+    }
+
+    pub fn page_by_name(&self, name: &str) -> Option<&ProfilePage> {
+        self.pages
+            .iter()
+            .find(|page| page.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Buttons that answer a key right now: the open page's own buttons first,
+    /// then the profile's main page, so folder navigation keys always work.
+    /// Every button of the profile, including the ones inside its pages.
+    pub fn all_buttons(&self) -> impl Iterator<Item = &MacroButton> + '_ {
+        self.buttons
+            .iter()
+            .chain(self.pages.iter().flat_map(|page| page.buttons.iter()))
+    }
+
+    pub fn buttons_for_page(&self, page: Option<&str>) -> Vec<&MacroButton> {
+        let mut buttons: Vec<&MacroButton> = Vec::new();
+        if let Some(page) = page.and_then(|id| self.page(id)) {
+            buttons.extend(page.buttons.iter());
+        }
+        buttons.extend(self.buttons.iter());
+        buttons
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let mut button_ids = std::collections::HashSet::new();
+        for page in &self.pages {
+            if page.id.trim().is_empty() {
+                return Err(format!(
+                    "Profile \"{}\" has a page with an empty id",
+                    self.name
+                ));
+            }
+            if page.name.trim().is_empty() {
+                return Err(format!(
+                    "Profile \"{}\" has a page with an empty name",
+                    self.name
+                ));
+            }
+        }
+
+        let mut page_ids = std::collections::HashSet::new();
+        let mut page_names = std::collections::HashSet::new();
+        for page in &self.pages {
+            if !page_ids.insert(page.id.as_str()) {
+                return Err(format!(
+                    "Profile \"{}\" has duplicate page id {}",
+                    self.name, page.id
+                ));
+            }
+            if !page_names.insert(page.name.to_ascii_lowercase()) {
+                return Err(format!(
+                    "Profile \"{}\" has two pages named \"{}\"",
+                    self.name, page.name
+                ));
+            }
+            self.validate_buttons(&page.buttons, &mut button_ids)?;
+        }
+
+        self.validate_buttons(&self.buttons, &mut button_ids)
+    }
+
+    fn validate_buttons(
+        &self,
+        buttons: &[MacroButton],
+        button_ids: &mut std::collections::HashSet<String>,
+    ) -> Result<(), String> {
         let mut physical_ids = std::collections::HashSet::new();
         let mut triggers: Vec<String> = Vec::new();
 
-        for button in &self.buttons {
+        for button in buttons {
             if button.id.trim().is_empty() {
                 return Err(format!(
                     "Profile \"{}\" has a button with an empty id",
                     self.name
                 ));
             }
-            if !button_ids.insert(button.id.as_str()) {
+            if !button_ids.insert(button.id.clone()) {
                 return Err(format!(
                     "Profile \"{}\" has duplicate button id {}",
                     self.name, button.id
@@ -294,7 +444,7 @@ impl Profile {
             }
 
             if let Some(id) = button.physical_key_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
-                if !physical_ids.insert(id) {
+                if !physical_ids.insert(id.to_string()) {
                     return Err(format!(
                         "Profile \"{}\" binds physical key {} twice",
                         self.name, id
@@ -313,7 +463,12 @@ impl Profile {
                 triggers.push(label);
             }
 
-            for action in &button.actions {
+            for action in button
+                .actions
+                .iter()
+                .chain(button.long_press_actions.iter())
+                .chain(button.alternate_actions.iter())
+            {
                 crate::actions::validate_type(&action.action_type).map_err(|e| {
                         format!(
                             "Profile \"{}\" button \"{}\": {}",
@@ -328,6 +483,13 @@ impl Profile {
 }
 
 impl MacroButton {
+    /// True when the button does something on a short press or a hold.
+    pub fn has_actions(&self) -> bool {
+        !self.actions.is_empty()
+            || !self.long_press_actions.is_empty()
+            || (self.toggle && !self.alternate_actions.is_empty())
+    }
+
     /// Trigger explicitly set on the button, or derived from the legacy slot.
     pub fn effective_trigger(&self) -> Result<Option<crate::shortcut::Shortcut>, String> {
         if let Some(trigger) = self.trigger.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
@@ -477,6 +639,48 @@ mod tests {
             "mode selection resumes once a mode profile is active"
         );
         assert_eq!(config.active_profile(false).unwrap().name, "Normal");
+    }
+
+    #[test]
+    fn page_buttons_shadow_the_main_page() {
+        let mut normal = profile("p", "Normal", vec![1]);
+        normal.pages.push(ProfilePage {
+            id: "folder".into(),
+            name: "Media".into(),
+            buttons: vec![MacroButton {
+                id: "page-1".into(),
+                key: Some(1),
+                name: "Play".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        normal.validate().expect("pages validate");
+
+        let page_buttons = normal.buttons_for_page(Some("folder"));
+        assert_eq!(page_buttons[0].id, "page-1", "the page answers first");
+        assert_eq!(page_buttons.len(), 2, "main page keys stay reachable");
+        assert_eq!(
+            normal.buttons_for_page(None)[0].id,
+            "p-0",
+            "the main page is used when no page is open"
+        );
+    }
+
+    #[test]
+    fn duplicate_page_names_are_rejected() {
+        let mut normal = profile("p", "Normal", vec![1]);
+        normal.pages.push(ProfilePage {
+            id: "a".into(),
+            name: "Media".into(),
+            ..Default::default()
+        });
+        normal.pages.push(ProfilePage {
+            id: "b".into(),
+            name: "Media".into(),
+            ..Default::default()
+        });
+        assert!(normal.validate().is_err());
     }
 
     #[test]

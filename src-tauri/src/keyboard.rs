@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::device::DeviceKeyEvent;
 use crate::keyid::KeyId;
-use crate::models::{AppConfig, MacroButton};
+use crate::models::{AppConfig, ButtonAction, MacroButton};
 use crate::shortcut::Shortcut;
 use crate::state::AppCore;
 
@@ -299,9 +299,10 @@ fn capture_keys(core: &AppCore) -> HashSet<(u16, bool)> {
         return HashSet::new();
     };
 
+    let page = core.page_for(&profile.id);
     let mut keys = HashSet::new();
-    for button in &profile.buttons {
-        if !button.enabled || button.actions.is_empty() {
+    for button in profile.buttons_for_page(page.as_deref()) {
+        if !button.enabled || !button.has_actions() {
             continue;
         }
         if let Some(scan) = button
@@ -327,43 +328,54 @@ fn capture_keys(core: &AppCore) -> HashSet<(u16, bool)> {
 }
 
 fn build_bindings(core: &AppCore) -> (HashMap<Shortcut, Binding>, Vec<String>) {
-    build_bindings_for(&core.config(), core.gaming())
+    let config = core.config();
+    let page = config
+        .active_profile(core.gaming())
+        .and_then(|profile| core.page_for(&profile.id));
+    build_bindings_for(&config, core.gaming(), page.as_deref())
 }
 
 /// The single definition of "this physical key runs a button": physical identity
 /// wins over labels and NumLock, then the configured trigger, then the legacy
-/// numeric key. Also used by the Raw Input layer to decide whether a keypad key
-/// must stay swallowed in capture mode.
-pub fn find_button_for_key(config: &AppConfig, gaming: bool, key: &KeyId) -> Option<MacroButton> {
+/// numeric key. The open page's buttons answer first, so a folder can rebind a
+/// key while the main page keeps its own assignment.
+pub fn find_button_for_key(
+    config: &AppConfig,
+    gaming: bool,
+    page: Option<&str>,
+    key: &KeyId,
+) -> Option<MacroButton> {
     let profile = config.active_profile(gaming)?;
-    let legacy = key.legacy_key();
-
     profile
-        .buttons
-        .iter()
-        .find(|button| {
-            if !button.enabled {
-                return false;
-            }
-            if let Some(id) = button.physical_key_id.as_deref().and_then(KeyId::parse) {
-                if id == *key {
-                    return true;
-                }
-            }
-            let trigger_match = button
-                .effective_trigger()
-                .ok()
-                .flatten()
-                .map(|shortcut| key.matches_shortcut(&shortcut))
-                .unwrap_or(false);
-            trigger_match || legacy.is_some() && button.key == legacy
-        })
+        .buttons_for_page(page)
+        .into_iter()
+        .find(|button| button_matches_key(button, key))
         .cloned()
+}
+
+fn button_matches_key(button: &MacroButton, key: &KeyId) -> bool {
+    if !button.enabled {
+        return false;
+    }
+    if let Some(id) = button.physical_key_id.as_deref().and_then(KeyId::parse) {
+        if id == *key {
+            return true;
+        }
+    }
+    let trigger_match = button
+        .effective_trigger()
+        .ok()
+        .flatten()
+        .map(|shortcut| key.matches_shortcut(&shortcut))
+        .unwrap_or(false);
+    let legacy = key.legacy_key();
+    trigger_match || legacy.is_some() && button.key == legacy
 }
 
 fn build_bindings_for(
     config: &crate::models::AppConfig,
     gaming: bool,
+    page: Option<&str>,
 ) -> (HashMap<Shortcut, Binding>, Vec<String>) {
     let mut bindings: HashMap<Shortcut, Binding> = HashMap::new();
     let mut problems: Vec<String> = Vec::new();
@@ -373,7 +385,25 @@ fn build_bindings_for(
     };
     let active_profile_id = profile.id.clone();
 
-    for button in &profile.buttons {
+    // Page buttons shadow the profile's own buttons for the same key, so a
+    // folder can take over a key without the main page complaining.
+    let page_buttons: Vec<&MacroButton> = page
+        .and_then(|id| profile.page(id))
+        .map(|page| page.buttons.iter().collect())
+        .unwrap_or_default();
+    let page_triggers: HashSet<Shortcut> = page_buttons
+        .iter()
+        .filter_map(|button| button.effective_trigger().ok().flatten())
+        .collect();
+
+    for button in page_buttons.into_iter().chain(profile.buttons.iter().filter(|button| {
+        button
+            .effective_trigger()
+            .ok()
+            .flatten()
+            .map(|shortcut| !page_triggers.contains(&shortcut))
+            .unwrap_or(true)
+    })) {
         if !button.enabled {
             continue;
         }
@@ -641,11 +671,10 @@ impl KeyboardManager {
             return vec![format!("button {} is disabled", button.name)];
         }
 
+        // Gaming mode is sticky: running a button never drops the deck back to
+        // the Normal profile. Only an explicit profile switch / mode toggle
+        // changes it.
         let results = crate::actions::run_button(&self.core, &button);
-        let mode_action = crate::actions::is_mode_action(&button);
-        if self.core.gaming() && !mode_action {
-            self.core.set_gaming(false);
-        }
         let _ = self.reload();
         results
     }
@@ -660,6 +689,8 @@ fn device_worker_loop(
 ) {
     // A swallowed key can also arrive through Raw Input; run its macro once.
     let mut last_fired: HashMap<String, Instant> = HashMap::new();
+    // Buttons with long-press actions that are currently held down.
+    let mut pending: HashMap<String, PendingPress> = HashMap::new();
 
     for event in receiver {
         if shutdown.load(Ordering::SeqCst) {
@@ -668,6 +699,8 @@ fn device_worker_loop(
         if core.app().state::<Arc<KeyboardManager>>().paused() {
             continue;
         }
+
+        let slot = format!("{}|{}", event.device_id, event.key_id);
 
         if event.down {
             if !pressed
@@ -682,7 +715,37 @@ fn device_worker_loop(
                 .lock()
                 .unwrap()
                 .remove(&(event.device_id.clone(), event.key_id.clone()));
-            continue; // Actions fire on key-down only.
+
+            // A button with long-press actions waits for the release: a short
+            // tap runs its normal actions, a hold runs the second set.
+            if let Some(pending) = pending.remove(&slot) {
+                let held = pending.started.elapsed();
+                let long_press = held >= long_press_threshold(&pending.button);
+                let actions = if long_press {
+                    pending.button.long_press_actions.as_slice()
+                } else {
+                    pending.button.actions.as_slice()
+                };
+                crate::logging::info(format!(
+                    "{} on {} -> {} ({}, held {} ms)",
+                    event.key_id,
+                    event.device_id,
+                    pending.button.name,
+                    if long_press { "long press" } else { "press" },
+                    held.as_millis()
+                ));
+                fire_actions(
+                    &core,
+                    &pending.button,
+                    actions,
+                    &event.device_id,
+                    &event.key_id,
+                    long_press,
+                );
+                triggers.fetch_add(1, Ordering::SeqCst);
+                core.emit_state(&core.app().state::<Arc<KeyboardManager>>().status());
+            }
+            continue;
         }
 
         let Some(key) = KeyId::parse(&event.key_id) else {
@@ -698,7 +761,8 @@ fn device_worker_loop(
         // Stable physical identity wins: labels and NumLock can change, but
         // scan code + extended flag cannot. Shared with the capture decision in
         // `device.rs` so a swallowed key always has a macro behind it.
-        let Some(button) = find_button_for_key(&config, core.gaming(), &key) else {
+        let page = core.page_for(&profile.id);
+        let Some(button) = find_button_for_key(&config, core.gaming(), page.as_deref(), &key) else {
             crate::logging::info(format!(
                 "no assignment for {} on {}",
                 event.key_id, profile.name
@@ -715,68 +779,114 @@ fn device_worker_loop(
         }
         last_fired.insert(event.key_id.clone(), now);
 
-        crate::logging::info(format!(
-            "{} on {} -> {} ({})",
-            event.key_id, event.device_id, button.name, button.id
-        ));
-        let _ = core.app().emit(
-            "macro-action-started",
-            serde_json::json!({
-                "deviceId": event.device_id,
-                "keyId": event.key_id,
-                "buttonId": button.id,
-                "buttonName": button.name,
-            }),
-        );
+        // Players expect a hold to be a second action, so these fire on release.
+        if !button.long_press_actions.is_empty() {
+            pending.insert(
+                slot,
+                PendingPress {
+                    button: button.clone(),
+                    started: now,
+                },
+            );
+            continue;
+        }
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::actions::run_button(&core, &button)
-        }));
-        let results = match result {
-            Ok(results) => results,
-            Err(_) => vec!["internal error: action engine panicked".to_string()],
-        };
+        fire_actions(
+            &core,
+            &button,
+            &button.actions,
+            &event.device_id,
+            &event.key_id,
+            false,
+        );
 
         triggers.fetch_add(1, Ordering::SeqCst);
-        let mode_action = crate::actions::is_mode_action(&button);
-        if core.gaming() && !mode_action {
-            core.set_gaming(false);
-        }
-
-        if let Err(error) = core.app().state::<Arc<KeyboardManager>>().reload() {
-            crate::logging::warn(format!("cannot refresh shortcuts: {}", error));
-        }
-
-        let event_name = if results_have_error(&results) {
-            "macro-action-error"
-        } else {
-            "macro-action-completed"
-        };
-        let _ = core.app().emit(
-            event_name,
-            serde_json::json!({
-                "deviceId": event.device_id,
-                "keyId": event.key_id,
-                "buttonId": button.id,
-                "buttonName": button.name,
-                "results": results,
-                "gamingMode": core.gaming(),
-            }),
-        );
-        let _ = core.app().emit(
-            "deck:triggered",
-            serde_json::json!({
-                "source": "device",
-                "deviceId": event.device_id,
-                "key": event.key_id,
-                "buttonId": button.id,
-                "buttonName": button.name,
-                "results": results,
-                "gamingMode": core.gaming(),
-            }),
-        );
+        // Gaming mode stays active until the user switches profile, so a key
+        // pressed while gaming does not silently return to Normal.
         core.emit_state(&core.app().state::<Arc<KeyboardManager>>().status());
     }
+}
+
+struct PendingPress {
+    button: MacroButton,
+    started: Instant,
+}
+
+/// How long a key must be held for its long-press actions (450 ms by default).
+fn long_press_threshold(button: &MacroButton) -> Duration {
+    Duration::from_millis(button.long_press_ms.unwrap_or(450).clamp(120, 5_000))
+}
+
+/// Runs one action set for a button and reports it to the UI. `held` is true
+/// when the key was held for its long-press actions.
+fn fire_actions(
+    core: &Arc<AppCore>,
+    button: &MacroButton,
+    actions: &[ButtonAction],
+    device_id: &str,
+    key_id: &str,
+    held: bool,
+) -> Vec<String> {
+    crate::logging::info(format!(
+        "{} on {} -> {} ({})",
+        key_id, device_id, button.name, button.id
+    ));
+    let _ = core.app().emit(
+        "macro-action-started",
+        serde_json::json!({
+            "deviceId": device_id,
+            "keyId": key_id,
+            "buttonId": button.id,
+            "buttonName": button.name,
+        }),
+    );
+
+    let context = if held {
+        crate::actions::RunContext::hold()
+    } else {
+        crate::actions::RunContext::tap()
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::actions::run_actions_with(core, actions, context)
+    }));
+    let results = match result {
+        Ok(results) => results,
+        Err(_) => vec!["internal error: action engine panicked".to_string()],
+    };
+
+    if let Err(error) = core.app().state::<Arc<KeyboardManager>>().reload() {
+        crate::logging::warn(format!("cannot refresh shortcuts: {}", error));
+    }
+
+    let event_name = if results_have_error(&results) {
+        "macro-action-error"
+    } else {
+        "macro-action-completed"
+    };
+    let _ = core.app().emit(
+        event_name,
+        serde_json::json!({
+            "deviceId": device_id,
+            "keyId": key_id,
+            "buttonId": button.id,
+            "buttonName": button.name,
+            "results": results,
+            "gamingMode": core.gaming(),
+        }),
+    );
+    let _ = core.app().emit(
+        "deck:triggered",
+        serde_json::json!({
+            "source": "device",
+            "deviceId": device_id,
+            "key": key_id,
+            "buttonId": button.id,
+            "buttonName": button.name,
+            "results": results,
+            "gamingMode": core.gaming(),
+        }),
+    );
+    results
 }
 
 fn results_have_error(results: &[String]) -> bool {
@@ -935,7 +1045,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (bindings, _) = build_bindings_for(&config, false);
+        let (bindings, _) = build_bindings_for(&config, false, None);
         assert_eq!(bindings.len(), 2);
         assert!(
             bindings.values().any(|b| b.button_id == "to_normal"),

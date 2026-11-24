@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { getStartWithWindows, openLogsFolder, setStartWithWindows } from "../lib/backend";
 import { useAppStore } from "../store";
+import { BackupContent } from "./BackupContent";
 import { DeviceManagerContent } from "./DeviceManagerContent";
 import { Icon, type IconName } from "./Icon";
 import { ProfilesContent } from "./ProfilesContent";
@@ -15,6 +16,7 @@ export type SettingsTab =
   | "phone"
   | "steam"
   | "profiles"
+  | "backup"
   | "app";
 
 interface Props {
@@ -72,6 +74,14 @@ const TABS: TabMeta[] = [
     title: "Profiles & config",
     description:
       "Create and switch profiles, then export, import or restore your configuration.",
+  },
+  {
+    id: "backup",
+    label: "Backup & restore",
+    icon: "folder",
+    title: "Backup & restore",
+    description:
+      "Save everything the app knows into one file, and put it back in one click.",
   },
   {
     id: "app",
@@ -176,6 +186,7 @@ export function SettingsDialog({
             {active.id === "phone" && <PhoneSection />}
             {active.id === "steam" && <SteamAccountsContent />}
             {active.id === "profiles" && <ProfilesContent />}
+            {active.id === "backup" && <BackupContent />}
             {active.id === "app" && <AppSection version={version} />}
           </div>
         </div>
@@ -548,6 +559,10 @@ function AppSection({ version }: { version: string }) {
     (s) => s.config.settings.images?.steamgriddbApiKey ?? "",
   );
   const setImageSearchApiKey = useAppStore((s) => s.setImageSearchApiKey);
+  const autoSwitchProfiles = useAppStore(
+    (s) => s.config.settings.general.autoSwitchProfiles !== false,
+  );
+  const setAutoSwitchProfiles = useAppStore((s) => s.setAutoSwitchProfiles);
   const [startsWithWindows, setStartsWithWindows] = useState<boolean | null>(null);
   const [startupBusy, setStartupBusy] = useState(false);
   const [startupMessage, setStartupMessage] = useState("");
@@ -654,6 +669,48 @@ function AppSection({ version }: { version: string }) {
           </span>
         </div>
         {startupMessage && <p className="settings-hint">{startupMessage}</p>}
+      </SectionCard>
+
+      <SectionCard title="Profiles">
+        <div className="settings-row">
+          <div>
+            <div className="settings-row-title">Switch profile by app</div>
+            <div className="settings-hint">
+              When a profile is linked to an app (Profiles → Auto-switch with an
+              app), the deck follows whichever app is in front. Turn this off to
+              keep the profile you choose — the app watcher then stays idle.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAutoSwitchProfiles(!autoSwitchProfiles)}
+            className={`ui-btn ${autoSwitchProfiles ? "ui-btn-ghost" : "ui-btn-primary"}`}
+            title={
+              autoSwitchProfiles
+                ? "Stop switching profiles automatically"
+                : "Switch profiles automatically again"
+            }
+          >
+            <Icon name="power" size={14} />
+            {autoSwitchProfiles ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+        <div className="settings-row">
+          <span>Status</span>
+          <span className="flex items-center gap-2">
+            <span
+              className="status-dot"
+              style={{
+                background: autoSwitchProfiles
+                  ? "var(--color-success)"
+                  : "var(--color-danger)",
+              }}
+            />
+            {autoSwitchProfiles
+              ? "Following the app in front"
+              : "Off — profile stays as chosen"}
+          </span>
+        </div>
       </SectionCard>
 
       <SectionCard title="Diagnostics">

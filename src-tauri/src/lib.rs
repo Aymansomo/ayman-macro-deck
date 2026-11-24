@@ -9,8 +9,11 @@
 //! - `logging`    file log in `%APPDATA%\com.ayman.macrodeck\logs\app.log`
 
 mod actions;
+mod apps;
+mod hotkeys;
 mod autostart;
 mod device;
+mod focus;
 mod keyid;
 mod keyboard;
 mod logging;
@@ -45,6 +48,17 @@ pub(crate) fn config_path(app: &tauri::AppHandle) -> PathBuf {
         .expect("failed to get app config dir");
     fs::create_dir_all(&dir).ok();
     dir.join("config.json")
+}
+
+/// Backend-owned UI state (which deck page is open per profile), kept in its own
+/// file so the editor's config saves can never overwrite it.
+pub(crate) fn ui_state_path(app: &tauri::AppHandle) -> PathBuf {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .expect("failed to get app config dir");
+    fs::create_dir_all(&dir).ok();
+    dir.join("session.json")
 }
 
 // --------------------------------------------------------------------------
@@ -96,12 +110,27 @@ fn execute_action(
     actions::validate(&action_type, &params)
         .map_err(|e| format!("Invalid action: {}", e))?;
 
+    // Shutdown / restart never run from one press: the first press only arms
+    // them and a second press inside the window confirms.
+    if actions::requires_confirmation(&action_type) {
+        if actions::confirm_dangerous(&action_type) {
+            actions::emit_confirmed(core.app(), &action_type);
+        } else {
+            let message = actions::confirmation_message(&action_type);
+            logging::warn(format!("execute_action armed: {}", message));
+            return Ok(message);
+        }
+    }
+
     let outcome = actions::execute(&action_type, &params)?;
     match &outcome {
         actions::Outcome::ToggleGaming => core.set_gaming(!core.gaming()),
         actions::Outcome::SwitchProfile(name) => {
             core.apply_profile_switch(name);
             core.persist()?;
+        }
+        actions::Outcome::OpenPage(page) => {
+            core.open_page(page);
         }
         actions::Outcome::Done(_) => {}
     }
@@ -110,6 +139,17 @@ fn execute_action(
     core.emit_state(&keyboard.status());
     logging::info(format!("execute_action {}: {}", action_type, outcome.message()));
     Ok(outcome.message())
+}
+
+/// Cancels a pending Shut Down / Restart confirmation (the banner's Cancel
+/// button). Returns true when an armed action was actually dropped.
+#[tauri::command]
+fn cancel_power_action(action_type: String) -> bool {
+    let cancelled = actions::disarm(&action_type);
+    if cancelled {
+        logging::info(format!("action disarmed by user: {}", action_type));
+    }
+    cancelled
 }
 
 /// Runs a button exactly like a physical key press (used to test a macro).
@@ -359,20 +399,13 @@ fn open_logs_folder(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn export_config(core: tauri::State<'_, Arc<AppCore>>) -> Result<String, String> {
-    Ok(core.config_json())
-}
-
-#[tauri::command]
-fn import_config(
-    config: String,
-    core: tauri::State<'_, Arc<AppCore>>,
-    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
-) -> Result<(), String> {
-    core.replace_config_json(&config)?;
-    keyboard.reload()?;
-    core.emit_state(&keyboard.status());
-    Ok(())
+fn open_data_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    open::that(dir).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -415,6 +448,138 @@ fn restore_config_backup(
     keyboard.reload()?;
     core.emit_state(&keyboard.status());
     Ok(())
+}
+
+// --------------------------------------------------------------------------
+// full backup / restore
+// --------------------------------------------------------------------------
+
+/// Marker written into a backup file, so any other JSON file is refused.
+const BACKUP_KIND: &str = "ayman-macro-deck-backup";
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupSummary {
+    path: String,
+    profiles: usize,
+    buttons: usize,
+}
+
+fn count_buttons(profile: &models::Profile) -> usize {
+    profile.buttons.len()
+        + profile
+            .pages
+            .iter()
+            .map(|page| page.buttons.len())
+            .sum::<usize>()
+}
+
+/// Writes everything the app owns into one JSON file: the configuration
+/// (profiles, buttons, actions, settings) and the UI session (open pages).
+#[tauri::command]
+fn backup_data(
+    app: tauri::AppHandle,
+    core: tauri::State<'_, Arc<AppCore>>,
+    destination: String,
+) -> Result<BackupSummary, String> {
+    let config_text = core.config_json();
+    let config = models::AppConfig::from_json(&config_text)?;
+    let session = fs::read_to_string(ui_state_path(&app))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+
+    let bundle = serde_json::json!({
+        "app": "AYMAN MACRO DECK",
+        "kind": BACKUP_KIND,
+        "createdAt": created_at,
+        "config": serde_json::from_str::<serde_json::Value>(&config_text)
+            .unwrap_or_else(|_| serde_json::json!({})),
+        "session": session,
+    });
+    let text = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+
+    let path = PathBuf::from(destination.trim());
+    let path = if path.extension().is_none() {
+        path.with_extension("json")
+    } else {
+        path
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, text).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+
+    let buttons = config.profiles.iter().map(count_buttons).sum();
+    logging::info(format!(
+        "backup: wrote {} ({} profiles, {} buttons)",
+        path.display(),
+        config.profiles.len(),
+        buttons
+    ));
+    Ok(BackupSummary {
+        path: path.display().to_string(),
+        profiles: config.profiles.len(),
+        buttons,
+    })
+}
+
+/// Restores a backup written by `backup_data`. The current configuration is
+/// backed up first, so a wrong file can always be undone.
+#[tauri::command]
+fn restore_data(
+    core: tauri::State<'_, Arc<AppCore>>,
+    keyboard: tauri::State<'_, Arc<KeyboardManager>>,
+    source: String,
+) -> Result<BackupSummary, String> {
+    let text = fs::read_to_string(source.trim())
+        .map_err(|e| format!("cannot read this file: {}", e))?;
+    let bundle: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| "This file is not an AYMAN MACRO DECK backup".to_string())?;
+    if bundle.get("kind").and_then(|value| value.as_str()) != Some(BACKUP_KIND) {
+        return Err("This file is not an AYMAN MACRO DECK backup".to_string());
+    }
+
+    let config_value = bundle
+        .get("config")
+        .cloned()
+        .ok_or("The backup does not contain a configuration")?;
+    let config_text = serde_json::to_string(&config_value).map_err(|e| e.to_string())?;
+    let config = models::AppConfig::from_json(&config_text)?;
+    config.validate()?;
+
+    core.backup_current_config()?;
+    core.replace_config_json(&config_text)?;
+
+    // Open pages are applied to the running engine, not just written to the
+    // session file: the engine keeps its own copy and would otherwise only see
+    // them after a restart.
+    let mut session_note = String::new();
+    if let Some(session) = bundle.get("session").filter(|value| value.is_object()) {
+        let pages = state::pages_from_session(session);
+        let applied = core.replace_pages(pages);
+        session_note = format!(", {} open page(s) applied", applied);
+    }
+
+    keyboard.reload()?;
+    core.emit_state(&keyboard.status());
+
+    let buttons = config.profiles.iter().map(count_buttons).sum();
+    logging::info(format!(
+        "restore: {} profiles, {} buttons{}",
+        config.profiles.len(),
+        buttons,
+        session_note
+    ));
+    Ok(BackupSummary {
+        path: PathBuf::from(source.trim()).display().to_string(),
+        profiles: config.profiles.len(),
+        buttons,
+    })
 }
 
 // --------------------------------------------------------------------------
@@ -489,6 +654,59 @@ fn set_active_profile(
     keyboard.reload()?;
     core.emit_state(&keyboard.status());
     Ok(core.state_json(&keyboard.status()))
+}
+
+/// Monitors ordered left to right, for the profile app placement pickers.
+#[tauri::command]
+fn list_monitors() -> Vec<apps::Monitor> {
+    apps::monitors()
+}
+
+/// Apps that currently have a window, for the "add running app" picker.
+#[tauri::command]
+fn list_running_apps() -> Vec<apps::RunningApp> {
+    apps::running_apps()
+}
+
+/// Runs a profile's apps right now, so the layout can be tried from Settings.
+/// It returns at once; each app reports back with a `profile-apps-result` event
+/// as it finishes, so a slow launch never blocks the Settings panel.
+#[tauri::command]
+fn apply_profile_apps(
+    app: tauri::AppHandle,
+    core: tauri::State<'_, Arc<AppCore>>,
+    profile_id: String,
+) -> Result<(), String> {
+    let apps = core
+        .config()
+        .profile(&profile_id)
+        .map(|profile| profile.apps.clone())
+        .ok_or_else(|| format!("Profile {} not found", profile_id))?;
+
+    let targets: Vec<models::ProfileApp> = apps
+        .into_iter()
+        .filter(|item| !item.path.trim().is_empty())
+        .collect();
+
+    if targets.is_empty() {
+        let _ = tauri::Emitter::emit(
+            &app,
+            "profile-apps-result",
+            serde_json::json!({ "profileId": profile_id, "line": "No apps configured", "done": true }),
+        );
+        return Ok(());
+    }
+
+    let handle = app.clone();
+    let id = profile_id.clone();
+    apps::apply_reporting(&targets, move |line, done| {
+        let _ = tauri::Emitter::emit(
+            &handle,
+            "profile-apps-result",
+            serde_json::json!({ "profileId": id, "line": line, "done": done }),
+        );
+    });
+    Ok(())
 }
 
 // --------------------------------------------------------------------------
@@ -1158,6 +1376,10 @@ pub fn run() {
             app.manage(keyboard.clone());
             app.manage(devices.clone());
 
+            // System-wide hotkeys live in their own thread and pick up config
+            // changes on the next save.
+            hotkeys::start(core.clone());
+
             match keyboard.start() {
                 Ok(()) => logging::info("native keyboard observer started"),
                 Err(error) => logging::error(format!("keyboard observer failed: {}", error)),
@@ -1166,6 +1388,9 @@ pub fn run() {
                 Ok(()) => logging::info("Raw Input keypad listener started"),
                 Err(error) => logging::error(format!("Raw Input listener failed: {}", error)),
             }
+
+            // Auto profile per app: watch the foreground window.
+            focus::start(core.clone(), keyboard.clone());
 
             let remote_state = Arc::new(server::RemoteState::new());
             server::boot(app.handle(), &remote_state);
@@ -1210,6 +1435,7 @@ pub fn run() {
             save_config,
             reload_ahk_script,
             execute_action,
+            cancel_power_action,
             trigger_button,
             get_app_state,
             get_gaming_mode,
@@ -1233,8 +1459,6 @@ pub fn run() {
             get_start_with_windows,
             set_start_with_windows,
             open_logs_folder,
-            export_config,
-            import_config,
             list_config_backups,
             restore_config_backup,
             list_profiles,
@@ -1243,6 +1467,12 @@ pub fn run() {
             duplicate_profile,
             delete_profile,
             set_active_profile,
+            list_monitors,
+            list_running_apps,
+            apply_profile_apps,
+            backup_data,
+            restore_data,
+            open_data_folder,
             list_audio_devices,
             list_lnk_files,
             get_application_info,

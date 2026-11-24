@@ -4,15 +4,18 @@
 //! devices through SoundVolumeView (same tool the config already points at) and
 //! system keys through `SendInput`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command as StdCommand;
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
+use tauri::Emitter;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -39,10 +42,107 @@ pub const ACTION_TYPES: &[&str] = &[
     "toggle_gaming_mode",
     "switch_profile",
     "keyboard_shortcut",
+    "play_sound",
+    "media_play_pause",
+    "media_next",
+    "media_previous",
+    "media_stop",
     "volume_up",
     "volume_down",
     "mute",
+    "stop_all_audio",
+    "open_page",
+    "lock_workstation",
+    "sleep_pc",
+    "sign_out",
+    "restart_pc",
+    "shutdown_pc",
+    "show_desktop",
+    "task_manager",
+    "screenshot",
+    "empty_recycle_bin",
 ];
+
+/// Actions that end the session, so one stray tap must not be enough.
+pub fn requires_confirmation(action_type: &str) -> bool {
+    matches!(action_type, "shutdown_pc" | "restart_pc")
+}
+
+/// How long a dangerous action stays armed after its first press.
+pub const CONFIRM_WINDOW_SECS: u64 = 5;
+
+fn action_label(action_type: &str) -> &'static str {
+    match action_type {
+        "shutdown_pc" => "Shut Down PC",
+        "restart_pc" => "Restart PC",
+        _ => "Action",
+    }
+}
+
+/// What the deck tells the user after the first, harmless press.
+pub fn confirmation_message(action_type: &str) -> String {
+    format!(
+        "{}: press again within {}s to confirm",
+        action_label(action_type),
+        CONFIRM_WINDOW_SECS
+    )
+}
+
+/// Tells the deck window that a dangerous action is waiting for its second
+/// press, so the window can show a countdown instead of only a result line.
+fn emit_armed(app: &tauri::AppHandle, action_type: &str) {
+    let _ = app.emit(
+        "power-action-armed",
+        serde_json::json!({
+            "actionType": action_type,
+            "label": action_label(action_type),
+            "windowSecs": CONFIRM_WINDOW_SECS,
+        }),
+    );
+}
+
+/// Clears the banner once the second press actually ran the action.
+pub fn emit_confirmed(app: &tauri::AppHandle, action_type: &str) {
+    let _ = app.emit(
+        "power-action-confirmed",
+        serde_json::json!({
+            "actionType": action_type,
+            "label": action_label(action_type),
+        }),
+    );
+}
+
+fn armed_actions() -> &'static Mutex<HashMap<String, Instant>> {
+    static ARMED: std::sync::OnceLock<Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    ARMED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// True when a dangerous action may run now: the first press only arms it and
+/// the next press inside the window confirms it.
+pub fn confirm_dangerous(action_type: &str) -> bool {
+    let window = Duration::from_secs(CONFIRM_WINDOW_SECS);
+    let now = Instant::now();
+    let Ok(mut armed) = armed_actions().lock() else {
+        return false;
+    };
+    armed.retain(|_, started| now.duration_since(*started) <= window);
+    match armed.remove(action_type) {
+        Some(_) => true,
+        None => {
+            armed.insert(action_type.to_string(), now);
+            false
+        }
+    }
+}
+
+/// Drops a pending confirmation, so the next press starts from scratch.
+/// The deck's Cancel button calls this; returns true when something was armed.
+pub fn disarm(action_type: &str) -> bool {
+    let Ok(mut armed) = armed_actions().lock() else {
+        return false;
+    };
+    armed.remove(action_type).is_some()
+}
 
 fn required_params(action_type: &str) -> &'static [&'static str] {
     match action_type {
@@ -57,6 +157,7 @@ fn required_params(action_type: &str) -> &'static [&'static str] {
         "open_folder" => &["path"],
         "switch_profile" => &["profile"],
         "keyboard_shortcut" => &["keys"],
+        "play_sound" => &["path"],
         _ => &[],
     }
 }
@@ -116,6 +217,8 @@ pub enum Outcome {
     Done(String),
     ToggleGaming,
     SwitchProfile(String),
+    /// Opens a deck page (folder); empty or `root` returns to the main page.
+    OpenPage(String),
 }
 
 impl Outcome {
@@ -124,6 +227,7 @@ impl Outcome {
             Outcome::Done(message) => message.clone(),
             Outcome::ToggleGaming => "Toggled gaming mode".to_string(),
             Outcome::SwitchProfile(profile) => format!("Switched to {} profile", profile),
+            Outcome::OpenPage(page) => format!("Opened page: {}", page),
         }
     }
 }
@@ -275,6 +379,16 @@ pub fn execute(action_type: &str, params: &Value) -> Result<Outcome, String> {
             Ok(Outcome::Done(format!("Sent shortcut: {}", keys)))
         }
 
+        "play_sound" => {
+            let path = params["path"].as_str().ok_or("missing 'path' parameter")?;
+            play_sound(path)?;
+            let name = Path::new(path.trim())
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path);
+            Ok(Outcome::Done(format!("Played sound: {}", name)))
+        }
+
         "volume_up" => {
             send_media_key(windows::Win32::UI::Input::KeyboardAndMouse::VK_VOLUME_UP);
             Ok(Outcome::Done("Volume up".to_string()))
@@ -290,8 +404,246 @@ pub fn execute(action_type: &str, params: &Value) -> Result<Outcome, String> {
             Ok(Outcome::Done("Mute toggled".to_string()))
         }
 
+        // Media keys are handled by whichever player owns the media session
+        // (Spotify, a browser, Windows Media Player…), so they control music
+        // without the app knowing anything about the player.
+        "media_play_pause" => {
+            send_media_key(windows::Win32::UI::Input::KeyboardAndMouse::VK_MEDIA_PLAY_PAUSE);
+            Ok(Outcome::Done("Play/Pause sent".to_string()))
+        }
+
+        "media_next" => {
+            send_media_key(windows::Win32::UI::Input::KeyboardAndMouse::VK_MEDIA_NEXT_TRACK);
+            Ok(Outcome::Done("Skipped to next track".to_string()))
+        }
+
+        "media_previous" => {
+            send_media_key(windows::Win32::UI::Input::KeyboardAndMouse::VK_MEDIA_PREV_TRACK);
+            Ok(Outcome::Done("Went to previous track".to_string()))
+        }
+
+        "media_stop" => {
+            send_media_key(windows::Win32::UI::Input::KeyboardAndMouse::VK_MEDIA_STOP);
+            Ok(Outcome::Done("Music stopped".to_string()))
+        }
+
+        // Stops everything this deck is playing *and* asks the media session to
+        // stop, so one key silences music and sound effects.
+        "stop_all_audio" => {
+            let stopped = stop_played_sounds();
+            send_media_key(windows::Win32::UI::Input::KeyboardAndMouse::VK_MEDIA_STOP);
+            Ok(Outcome::Done(format!(
+                "Stopped {} sound{} and music",
+                stopped,
+                if stopped == 1 { "" } else { "s" }
+            )))
+        }
+
+        "open_page" => {
+            let page = params
+                .get("page")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(Outcome::OpenPage(page))
+        }
+
+        "lock_workstation" => {
+            spawn_hidden("rundll32.exe", &["user32.dll,LockWorkStation"])?;
+            Ok(Outcome::Done("Workstation locked".to_string()))
+        }
+
+        "sleep_pc" => {
+            spawn_hidden("rundll32.exe", &["powrprof.dll,SetSuspendState", "0,1,0"])?;
+            Ok(Outcome::Done("Going to sleep".to_string()))
+        }
+
+        "sign_out" => {
+            spawn_hidden("shutdown.exe", &["/l"])?;
+            Ok(Outcome::Done("Signing out".to_string()))
+        }
+
+        "restart_pc" => {
+            spawn_hidden("shutdown.exe", &["/r", "/t", "0"])?;
+            Ok(Outcome::Done("Restarting".to_string()))
+        }
+
+        "shutdown_pc" => {
+            spawn_hidden("shutdown.exe", &["/s", "/t", "0"])?;
+            Ok(Outcome::Done("Shutting down".to_string()))
+        }
+
+        "show_desktop" => {
+            send_shortcut(&[0x5B, 0x44]);
+            Ok(Outcome::Done("Showing the desktop".to_string()))
+        }
+
+        "task_manager" => {
+            spawn_hidden("taskmgr.exe", &[])?;
+            Ok(Outcome::Done("Task Manager opened".to_string()))
+        }
+
+        "screenshot" => {
+            let path = take_screenshot()?;
+            Ok(Outcome::Done(format!("Screenshot saved: {}", path)))
+        }
+
+        "empty_recycle_bin" => {
+            spawn_hidden_powershell("Clear-RecycleBin -Force -ErrorAction SilentlyContinue")?;
+            Ok(Outcome::Done("Recycle Bin emptied".to_string()))
+        }
+
         other => Err(format!("Unknown action type: {}", other)),
     }
+}
+
+/// Plays an audio file in the background so the next chained action can run
+/// immediately. WAV, MP3, M4A and WMA are played by the Windows MediaPlayer
+/// object that ships with Windows, so nothing extra has to be installed.
+fn play_sound(path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("missing sound file".to_string());
+    }
+    if !Path::new(trimmed).is_file() {
+        return Err(format!("sound file not found: {}", trimmed));
+    }
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName PresentationCore
+$player = New-Object System.Windows.Media.MediaPlayer
+$player.Open([uri]$env:AYMAN_DECK_SOUND)
+$waited = 0
+while (-not $player.NaturalDuration.HasTimeSpan -and $waited -lt 5000) {
+  Start-Sleep -Milliseconds 50
+  $waited += 50
+}
+$player.Play()
+$length = if ($player.NaturalDuration.HasTimeSpan) { $player.NaturalDuration.TimeSpan.TotalMilliseconds } else { 5000 }
+if ($length -gt 600000) { $length = 600000 }
+Start-Sleep -Milliseconds ([int]$length + 200)
+$player.Close()
+"#;
+
+    let child = StdCommand::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .env("AYMAN_DECK_SOUND", trimmed)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|error| format!("cannot start audio playback: {}", error))?;
+
+    // Remembered so "stop all audio" can cut this sound off immediately
+    // instead of waiting for it to play out.
+    if let Ok(mut players) = played_sounds().lock() {
+        players.retain(|pid| *pid != child.id());
+        players.push(child.id());
+    }
+    Ok(())
+}
+
+static PLAYED_SOUNDS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn played_sounds() -> &'static std::sync::Mutex<Vec<u32>> {
+    &PLAYED_SOUNDS
+}
+
+/// Kills every sound player this deck started; returns how many were running.
+fn stop_played_sounds() -> usize {
+    let Ok(mut players) = played_sounds().lock() else {
+        return 0;
+    };
+    let mut stopped = 0;
+    for pid in players.drain(..) {
+        if StdCommand::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .is_ok()
+        {
+            stopped += 1;
+        }
+    }
+    stopped
+}
+
+fn spawn_hidden(program: &str, args: &[&str]) -> Result<(), String> {
+    StdCommand::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("cannot run {}: {}", program, error))
+}
+
+fn spawn_hidden_powershell(script: &str) -> Result<(), String> {
+    StdCommand::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("cannot run PowerShell: {}", error))
+}
+
+/// Captures every monitor to `Pictures` and returns the saved file path.
+fn take_screenshot() -> Result<String, String> {
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)
+$folder = [Environment]::GetFolderPath('MyPictures')
+$name = 'Screenshot ' + (Get-Date -Format 'yyyy-MM-dd HH.mm.ss') + '.png'
+$path = Join-Path $folder $name
+$bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+$graphics.Dispose()
+$bitmap.Dispose()
+Write-Output $path
+"#;
+
+    let output = StdCommand::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("cannot take a screenshot: {}", error))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf16_lossy(
+            &output
+                .stderr
+                .chunks(2)
+                .map(|pair| u16::from_le_bytes([pair[0], *pair.get(1).unwrap_or(&0)]))
+                .collect::<Vec<u16>>(),
+        )
+        .trim()
+        .to_string());
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(path)
 }
 
 fn open_path(path: &str) -> Result<(), String> {
@@ -457,8 +809,9 @@ pub fn enrich_params(settings: &Settings, action: &ButtonAction) -> Value {
     params
 }
 
-/// True for buttons that change the mode/profile and therefore must not trigger
-/// the "one-shot gaming" auto-return.
+/// True for buttons that change the mode/profile. These stay reachable from
+/// every profile, so a keypad key can always jump to another profile; gaming
+/// mode is otherwise sticky and is never dropped by an ordinary button.
 pub fn is_mode_action(button: &MacroButton) -> bool {
     button
         .actions
@@ -466,13 +819,77 @@ pub fn is_mode_action(button: &MacroButton) -> bool {
         .any(|a| a.action_type == "toggle_gaming_mode" || a.action_type == "switch_profile")
 }
 
-/// Runs every action of a button in order, applying state changes through `core`.
+/// Extra context about how a button was pressed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunContext {
+    /// The key was held for its long-press action set. A deliberate hold counts
+    /// as the confirmation a dangerous action needs.
+    pub held: bool,
+}
+
+impl RunContext {
+    pub fn tap() -> Self {
+        Self::default()
+    }
+
+    pub fn hold() -> Self {
+        Self { held: true }
+    }
+}
+
+/// Runs a button: its normal actions, or - for a toggle button - the action set
+/// for the state it is entering. The state is remembered until the app exits.
 pub fn run_button(core: &AppCore, button: &MacroButton) -> Vec<String> {
+    run_button_with(core, button, RunContext::tap())
+}
+
+pub fn run_button_with(core: &AppCore, button: &MacroButton, context: RunContext) -> Vec<String> {
+    if button.toggle && !button.alternate_actions.is_empty() {
+        let on = core.toggle_state(&button.id);
+        let actions = if on {
+            &button.alternate_actions
+        } else {
+            &button.actions
+        };
+        let mut results = run_actions_with(core, actions, context);
+        results.push(if on {
+            "State: on".to_string()
+        } else {
+            "State: off".to_string()
+        });
+        return results;
+    }
+
+    run_actions_with(core, &button.actions, context)
+}
+
+/// Runs every action of a button in order, applying state changes through `core`.
+pub fn run_actions(core: &AppCore, actions: &[ButtonAction]) -> Vec<String> {
+    run_actions_with(core, actions, RunContext::tap())
+}
+
+pub fn run_actions_with(
+    core: &AppCore,
+    actions: &[ButtonAction],
+    context: RunContext,
+) -> Vec<String> {
     let settings = core.settings();
     let mut results = Vec::new();
 
-    for action in &button.actions {
+    for action in actions {
         let params = enrich_params(&settings, action);
+
+        if requires_confirmation(&action.action_type) && !context.held {
+            if confirm_dangerous(&action.action_type) {
+                emit_confirmed(core.app(), &action.action_type);
+            } else {
+                let message = confirmation_message(&action.action_type);
+                crate::logging::warn(format!("action armed: {}", message));
+                emit_armed(core.app(), &action.action_type);
+                results.push(message);
+                continue;
+            }
+        }
 
         if let Err(error) = validate(&action.action_type, &params) {
             crate::logging::warn(format!("action skipped: {}", error));
@@ -501,6 +918,10 @@ pub fn run_button(core: &AppCore, button: &MacroButton) -> Vec<String> {
                 }
                 results.push(format!("Switched to {} profile", profile));
             }
+            Ok(Outcome::OpenPage(page)) => match core.open_page(&page) {
+                Some(name) => results.push(format!("Page: {}", name)),
+                None => results.push("Page not found".to_string()),
+            },
             Err(error) => {
                 crate::logging::error(format!("action {} failed: {}", action.action_type, error));
                 results.push(format!("{}: {}", action.action_type, error));
@@ -607,7 +1028,7 @@ fn make_key_input(
     }
 }
 
-fn key_name_to_vk(name: &str) -> Option<u16> {
+pub(crate) fn key_name_to_vk(name: &str) -> Option<u16> {
     let named = match name {
         "ctrl" | "control" => Some(0x11),
         "alt" | "menu" => Some(0x12),
@@ -666,6 +1087,45 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn power_actions_need_a_second_press() {
+        assert!(requires_confirmation("shutdown_pc"));
+        assert!(requires_confirmation("restart_pc"));
+        // Every other system action stays a single press.
+        for action in [
+            "sleep_pc",
+            "lock_workstation",
+            "sign_out",
+            "show_desktop",
+            "task_manager",
+            "screenshot",
+            "empty_recycle_bin",
+            "stop_all_audio",
+        ] {
+            assert!(!requires_confirmation(action), "{} should stay one press", action);
+        }
+        assert!(confirmation_message("shutdown_pc").contains("press again"));
+    }
+
+    #[test]
+    fn dangerous_action_arms_then_confirms() {
+        // First press only arms, the next one inside the window runs it, and
+        // the state does not linger after that.
+        assert!(!confirm_dangerous("restart_pc"));
+        assert!(confirm_dangerous("restart_pc"));
+        assert!(!confirm_dangerous("restart_pc"));
+    }
+
+    #[test]
+    fn armed_action_can_be_cancelled() {
+        // Cancel really disarms: after it, the next press only arms again.
+        assert!(!confirm_dangerous("shutdown_pc"));
+        assert!(disarm("shutdown_pc"));
+        assert!(!disarm("shutdown_pc"));
+        assert!(!confirm_dangerous("shutdown_pc"));
+        assert!(confirm_dangerous("shutdown_pc"));
+    }
+
+    #[test]
     fn validates_required_parameters() {
         assert!(validate("open_url", &json!({"url": "https://x"} )).is_ok());
         assert!(validate("open_url", &json!({"url": "   "})).is_err());
@@ -678,6 +1138,22 @@ mod tests {
     fn validates_shortcut_combinations() {
         assert!(validate("keyboard_shortcut", &json!({"keys": "Ctrl+Shift+M"})).is_ok());
         assert!(validate("keyboard_shortcut", &json!({"keys": "Ctrl+Banana"})).is_err());
+    }
+
+    #[test]
+    fn media_actions_need_no_parameters() {
+        for action in ["media_play_pause", "media_next", "media_previous", "media_stop"] {
+            assert!(validate_type(action).is_ok(), "{} should be known", action);
+            assert!(validate(action, &json!({})).is_ok(), "{} needs no params", action);
+        }
+    }
+
+    #[test]
+    fn sound_action_needs_an_existing_file() {
+        assert!(validate_type("play_sound").is_ok());
+        assert!(validate("play_sound", &json!({})).is_err());
+        assert!(validate("play_sound", &json!({"path": "   "})).is_err());
+        assert!(play_sound(r"C:\\definitely\\missing\\sound.wav").is_err());
     }
 
     #[test]
